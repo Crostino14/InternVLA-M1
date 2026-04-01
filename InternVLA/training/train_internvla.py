@@ -30,8 +30,7 @@ from InternVLA.model.framework import build_framework
 from InternVLA.training.trainer_utils.metrics import TrainerUtils
 from InternVLA.training.trainer_utils.metrics import build_param_lr_groups
 
-deepspeed_plugin = DeepSpeedPlugin()
-accelerator = Accelerator(deepspeed_plugin=deepspeed_plugin)
+accelerator = Accelerator()
 accelerator.print(accelerator.state)
 
 # Sane Defaults
@@ -128,11 +127,12 @@ def seed_everything(seed: int, deterministic: bool = False):
     torch.cuda.manual_seed_all(seed)
     set_seed(seed)
 
+    torch.backends.cudnn.deterministic = deterministic
+    torch.backends.cudnn.benchmark = not deterministic
+
     if deterministic:
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
         try:
-            torch.use_deterministic_algorithms(True)
+            torch.use_deterministic_algorithms(True, warn_only=True)
         except Exception:
             pass
 
@@ -481,7 +481,7 @@ def main(cfg) -> None:
     logger.info("VLA Training :: Warming Up")
     
     base_seed = int(getattr(cfg, "seed", 42))
-    seed_everything(base_seed, deterministic=True)
+    seed_everything(base_seed, deterministic=False)
 
     # create output directory and save config
     output_dir = setup_directories(cfg=cfg)

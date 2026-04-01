@@ -1,15 +1,15 @@
 #!/bin/bash
 
 #SBATCH --account=did_robot_learning_359
-#SBATCH --job-name=50eps_finetune_internvla_libero_goal_l3
+#SBATCH --job-name=10eps_finetune_internvla_libero_goal_l3
 #SBATCH --partition=gpuq
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=64
 #SBATCH --exclusive
-#SBATCH --output=/mnt/beegfs/a.cardamone7/outputs/logs/finetune_50eps_internvla_l3_%j.out
-#SBATCH --error=/mnt/beegfs/a.cardamone7/outputs/logs/finetune_50eps_internvla_l3_%j.err
+#SBATCH --output=/mnt/beegfs/a.cardamone7/outputs/logs/finetune_10eps_internvla_l3_%j.out
+#SBATCH --error=/mnt/beegfs/a.cardamone7/outputs/logs/finetune_10eps_internvla_l3_%j.err
 
 SCRIPT_PATH="$(realpath $0)"
 
@@ -42,7 +42,7 @@ export NCCL_TIMEOUT=1000
 CHECKPOINT_PATH="${1:-/mnt/beegfs/a.cardamone7/checkpoints/InternVLA-M1-LIBERO-Goal/checkpoints/steps_30000_pytorch_model.pt}"
 PRETRAINED_CHECKPOINT="/mnt/beegfs/a.cardamone7/checkpoints/InternVLA-M1-LIBERO-Goal/checkpoints/steps_30000_pytorch_model.pt"
 RUN_ID_NOTE="${2:-l3_spatial_finetune}"
-MAX_EPISODES_PER_TASK="${3:-50}"
+MAX_EPISODES_PER_TASK="${3:-10}"
 MAX_STEPS="${4:-50000}"
 SAVE_INTERVAL="${5:-500}"
 RUN_ROOT_DIR="${6:-/mnt/beegfs/a.cardamone7/checkpoints/InternVLA_L3_Variations_finetune_libero_goal}"
@@ -56,7 +56,7 @@ RUN_DIR="${RUN_ROOT_DIR}/internvla_l3_eps${MAX_EPISODES_PER_TASK}_${RUN_ID_NOTE}
 LAST_CKPT=$(ls ${RUN_DIR}/checkpoints/steps_*_pytorch_model.pt 2>/dev/null \
   | sort -t_ -k2 -n | tail -1)
 
-#LAST_CKPT="/mnt/beegfs/a.cardamone7/checkpoints/InternVLA_L3_finetune_libero_goal/internvla_l3_eps50_l3_spatial_finetune/checkpoints/#steps_24000_pytorch_model.pt"
+#LAST_CKPT="/mnt/beegfs/a.cardamone7/checkpoints/InternVLA_L3_finetune_libero_goal/internvla_l3_eps10_l3_spatial_finetune/checkpoints/#steps_24000_pytorch_model.pt"
 
 if [ -n "$LAST_CKPT" ]; then
   LAST_STEP=$(echo "$LAST_CKPT" | grep -oP 'steps_\K[0-9]+')
@@ -87,7 +87,7 @@ MASTER_PORT=$((29500 + SLURM_JOB_ID % 1000))
 echo "Using MASTER_PORT=$MASTER_PORT"
 
 accelerate launch \
-  --config_file ${INTERNVLA_ROOT}/InternVLA/config/deepseeds/deepspeed_zero2.yaml \
+  --config_file /home/A.CARDAMONE7/repo/VLA-Bench/robosuite_test/InternVLA-M1/InternVLA/config/deepseeds/deepspeed_zero2.yaml \
   --num_processes 4 \
   --main_process_port ${MASTER_PORT} \
   ${INTERNVLA_ROOT}/InternVLA/training/train_internvla.py \

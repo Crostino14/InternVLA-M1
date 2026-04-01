@@ -1,7 +1,7 @@
 
 import numpy as np
 
-sr = np.array([97.2, 93.5, 98, 85.3, 98.8, 94.7,  99.7, 93.4, 100, 99])
+sr = np.array([97.2,93.5,98,85.3,98.8,94.7,99.7,93.4,99.8,99])
 mean = np.mean(sr)
 std = np.std(sr, ddof=1)
 print(f"{mean:.1f}% ± {std:.1f}%".replace(".", ","))
