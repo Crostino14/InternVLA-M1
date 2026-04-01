@@ -118,6 +118,7 @@ class LeRobotSingleDataset(Dataset):
         video_backend_kwargs: dict | None = None,
         transforms: ComposedModalityTransform | None = None,
         delete_pause_frame: bool = False,
+        max_episodes: int | None = None,
     ):
         """
         Initialize the dataset.
@@ -130,12 +131,14 @@ class LeRobotSingleDataset(Dataset):
             video_backend_kwargs (dict): Keyword arguments for the video backend when initializing the video reader.
             transforms (ComposedModalityTransform): The transforms to apply to the dataset.
             embodiment_tag (EmbodimentTag): Overload the embodiment tag for the dataset. e.g. define it as "new_embodiment"
+            max_episodes (int | None): The maximum number of episodes to load from the dataset.
         """
         # first check if the path directory exists
         if not Path(dataset_path).exists():
             raise FileNotFoundError(f"Dataset path {dataset_path} does not exist")
 
         self.delete_pause_frame = delete_pause_frame
+        self.max_episodes = max_episodes
 
         self.modality_configs = modality_configs
         self.video_backend = video_backend
@@ -164,6 +167,12 @@ class LeRobotSingleDataset(Dataset):
         self.curr_traj_id = None
 
         self._trajectory_ids, self._trajectory_lengths = self._get_trajectories()
+        
+        if self.max_episodes is not None and self.max_episodes > 0:
+            print(f"Limiting dataset '{self.dataset_name}' to {self.max_episodes} episodes.")
+            self._trajectory_ids = self._trajectory_ids[:self.max_episodes]
+            self._trajectory_lengths = self._trajectory_lengths[:self.max_episodes]
+
         self._modality_keys = self._get_modality_keys()
         self._delta_indices = self._get_delta_indices()
         self._all_steps = self._get_all_steps()
@@ -398,7 +407,7 @@ class LeRobotSingleDataset(Dataset):
         steps_filename = f"steps_{config_key}.pkl"
         # @DUG 
         # fast get static steps @fangjing --> don't use hash to dynamic sample
-        steps_filename =  "steps_7799a3080fbd.pkl"
+        #steps_filename =  "steps_7799a3080fbd.pkl"
 
         steps_path = self.dataset_path / "meta" / steps_filename
         
@@ -448,6 +457,7 @@ class LeRobotSingleDataset(Dataset):
         config_dict = {
             "delete_pause_frame": self.delete_pause_frame,
             "dataset_name": self.dataset_name,
+            "max_episodes": self.max_episodes,
         }
         # Create a hash of the configuration
         config_str = str(sorted(config_dict.items()))
@@ -713,28 +723,39 @@ class LeRobotSingleDataset(Dataset):
         Returns:
             dict: The data for the step.
         """
-        trajectory_id, base_index = self.all_steps[index]
-        data = self.get_step_data(trajectory_id, base_index)
-        
-        # Process all video keys dynamically
-        images = []
-        for video_key in self.modality_keys["video"]:
-            image = data[video_key][0]
+        try:
+            trajectory_id, base_index = self.all_steps[index]
+            data = self.get_step_data(trajectory_id, base_index)
             
-            # Apply image cropping if enabled and the video key is base_view
-            # Note: crop_obs_camera functionality has been removed
+            # Process all video keys dynamically
+            images = []
+            for video_key in self.modality_keys["video"]:
+                image = data[video_key][0]
+                
+                # Apply image cropping if enabled and the video key is base_view
+                # Note: crop_obs_camera functionality has been removed
+                
+                image = Image.fromarray(image).resize((224, 224))
+                images.append(image)
             
-            image = Image.fromarray(image).resize((224, 224))
-            images.append(image)
-        
-        # Get language and action data
-        language = data[self.modality_keys["language"][0]][0]
-        action = []
-        for action_key in self.modality_keys["action"]:
-            action.append(data[action_key])
-        action = np.concatenate(action, axis=1)
-        
-        return dict(action=action, image=images, language=language)
+            # Get language and action data
+            lang = ""  # Default to empty string if no language annotation
+            if "language" in self.modality_keys and len(self.modality_keys["language"]) > 0:
+                lang_data = data[self.modality_keys["language"][0]][0]
+                if lang_data is not None:
+                    lang = lang_data
+            
+            action = []
+            for action_key in self.modality_keys["action"]:
+                action.append(data[action_key])
+            action = np.concatenate(action, axis=1)
+            
+            return dict(action=action, image=images, lang=lang)
+        except Exception as e:
+            print(f"ERROR in __getitem__ at index {index}: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
 
     def get_step_data(self, trajectory_id: int, base_index: int) -> dict:
         """Get the RAW data for a single step in a trajectory. No transforms are applied.
@@ -1006,9 +1027,25 @@ class LeRobotSingleDataset(Dataset):
         original_key = subkey_meta.original_key
         if original_key is None:
             original_key = key
+        task_results = []
         for i in range(len(step_indices)):
-            task_indices.append(self.curr_traj_data[original_key][step_indices[i]].item())
-        return self.tasks.loc[task_indices]["task"].tolist()
+            val = self.curr_traj_data[original_key][step_indices[i]]
+            
+            if isinstance(val, (str, bytes)):
+                # Dataset L3: il valore è già la stringa del task
+                if isinstance(val, bytes):
+                    val = val.decode("utf-8")
+                task_results.append(val)
+            else:
+                # Dataset originale: il valore è un indice intero (numpy/torch scalar)
+                task_results.append(val.item())
+
+        # Se i valori sono già stringhe, restituiscile direttamente;
+        # altrimenti fai il lookup classico nella task table
+        if task_results and isinstance(task_results[0], str):
+            return task_results
+        else:
+            return self.tasks.loc[task_results]['task'].tolist()
 
     def get_data_by_modality(
         self,
@@ -1350,45 +1387,57 @@ def get_used_modality_keys(modality_keys: dict) -> tuple[set, set]:
 
 class LeRobotMixtureDataset(Dataset):
     """
-    A mixture of multiple datasets. This class samples a single dataset based on the dataset weights and then calls the `__getitem__` method of the sampled dataset.
-    It is recommended to modify the single dataset class instead of this class.
+    A dataset that mixes multiple LeRobotSingleDataset objects.
     """
 
     def __init__(
         self,
-        data_mixture: Sequence[tuple[LeRobotSingleDataset, float]],
-        mode: str,
-        balance_dataset_weights: bool = True,
-        balance_trajectory_weights: bool = True,
+        data_root_dir: Path | str,
+        mixture_spec: Sequence[tuple[str, float, str]],
+        mode: str = "train",
+        balance_dataset_weights: bool = False,
+        balance_trajectory_weights: bool = False,
         seed: int = 42,
-        metadata_config: dict = {
-            "percentile_mixing_method": "min_max",
-        },
+        delete_pause_frame: bool = True,
+        max_episodes_per_task: int | None = None,
     ):
         """
-        Initialize the mixture dataset.
+        Initialize the dataset.
 
         Args:
-            data_mixture (list[tuple[LeRobotSingleDataset, float]]): Datasets and their corresponding weights.
-            mode (str): If "train", __getitem__ will return different samples every epoch; if "val" or "test", __getitem__ will return the same sample every epoch.
-            balance_dataset_weights (bool): If True, the weight of dataset will be multiplied by the total trajectory length of each dataset.
-            balance_trajectory_weights (bool): If True, sample trajectories within a dataset weighted by their length; otherwise, use equal weighting.
-            seed (int): Random seed for sampling.
+            data_root_dir (Path | str): The root directory of the dataset.
+            mixture_spec (Sequence[tuple[str, float, str]]): A list of tuples, where each tuple contains the dataset name, the weight, and the robot type.
+            mode (str): The mode of the dataset, either "train" or "val".
+            balance_dataset_weights (bool): Whether to balance the dataset weights.
+            balance_trajectory_weights (bool): Whether to balance the trajectory weights.
+            seed (int): The seed for the random number generator.
+            delete_pause_frame (bool): Whether to delete pause frames.
+            max_episodes_per_task (int | None): The maximum number of episodes to load per task.
         """
-        datasets: list[LeRobotSingleDataset] = []
-        dataset_sampling_weights: list[float] = []
-        for dataset, weight in data_mixture:
-            # Check if dataset is valid and has data
-            if len(dataset) == 0:
-                print(f"Warning: Skipping empty dataset {dataset.dataset_name}")
-                continue
-            datasets.append(dataset)
-            dataset_sampling_weights.append(weight)
+        self.data_root_dir = Path(data_root_dir)
+        self.mixture_spec = mixture_spec
+        self.mode = mode
+        self.balance_dataset_weights = balance_dataset_weights
+        self.balance_trajectory_weights = balance_trajectory_weights
+        self.seed = seed
+        self.delete_pause_frame = delete_pause_frame
+        self.max_episodes_per_task = max_episodes_per_task
+
+        from InternVLA.dataloader.lerobot_datasets import make_LeRobotSingleDataset
+        self.datasets = [
+            make_LeRobotSingleDataset(
+                data_root_dir=self.data_root_dir,
+                data_name=data_name,
+                robot_type=robot_type,
+                delete_pause_frame=self.delete_pause_frame,
+                max_episodes_per_task=self.max_episodes_per_task,
+            )
+            for data_name, _, robot_type in self.mixture_spec
+        ]
         
-        if len(datasets) == 0:
+        if len(self.datasets) == 0:
             raise ValueError("No valid datasets found in the mixture. All datasets are empty.")
         
-        self.datasets = datasets
         self.balance_dataset_weights = balance_dataset_weights
         self.balance_trajectory_weights = balance_trajectory_weights
         self.seed = seed
@@ -1401,6 +1450,7 @@ class LeRobotMixtureDataset(Dataset):
         print(f"Dataset lengths: {self._dataset_lengths}")
 
         # 2. Dataset sampling weights
+        dataset_sampling_weights = [1.0] * len(self.datasets)
         self._dataset_sampling_weights = np.array(dataset_sampling_weights)
         
         if self.balance_dataset_weights:
@@ -1463,7 +1513,7 @@ class LeRobotMixtureDataset(Dataset):
         # Set the epoch and sample the first epoch
         self.set_epoch(0)
 
-        self.update_metadata(metadata_config)
+        self.update_metadata({"percentile_mixing_method": "weighted_average"})
 
     @property
     def dataset_lengths(self) -> np.ndarray:

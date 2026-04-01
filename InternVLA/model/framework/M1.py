@@ -63,10 +63,11 @@ class InternVLA_M1(baseframework):
         self.qwen_vl_interface = get_qwen2_5_interface(config=self.config)
         self.layer_qformer = get_layerwise_qformer(config=self.config)
         self.action_model = get_action_model(config=self.config)
-        self.dino_encoder = get_dino_model(backone_name=getattr(self.config.framework.dino, "dino_backbone", "dinov2_vits14"))
+        self.dino_encoder = get_dino_model(backone_name="dinov2_vitl14")
         self.dino_pro = nn.Linear(
             in_features=self.dino_encoder.num_channels,
-            out_features=self.qwen_vl_interface.model.config.hidden_size
+            out_features=self.config.framework.qwenvl.vl_hidden_dim  # = 2048
+            #out_features=self.qwen_vl_interface.model.config.text_config.hidden_size
         )
 
         self.future_action_window_size = config.framework.action_model.future_action_window_size
@@ -164,109 +165,105 @@ class InternVLA_M1(baseframework):
     @torch.inference_mode()
     def predict_action(
         self,
-        batch_images: List[List[Image.Image]],  # B * List of PIL Image as [view1, view2]
+        batch_images: List[List[Image.Image]],
         instructions: List[str],
         cfg_scale: float = 1.5,
         use_ddim: bool = True,
         num_ddim_steps: int = 5,
-        resize_image = [224, 224],
-        **kwargs: str,
-    ) -> np.ndarray:
+        resize_image=[224, 224],
+        use_cot_grounding: bool = False,
+        cot_grounding_query: str = (
+            "Your task is {instruction}. First, identify key objects and their positions using  spatial relations: left/right of, in front/behind, next to, above/below."
+        ),
+        max_cot_tokens: int = 48,
+        **kwargs,
+    ) -> dict:
         """
-        Inference: generate future normalized action sequence via diffusion sampling.
-
-        Steps:
-          1. Resize images to training resolution (if specified)
-          2. Encode with QwenVL (hidden states retained)
-          3. Extract DINO tokens and project to vlm hidden size
-          4. Build multi-layer fused QwenVL and DINO features via QFormer
-          5. Run diffusion sampling (DDIM optional, CFG optional)
-          6. Return normalized action trajectory
-
-        Args:
-            batch_images: List of samples; each sample is List[PIL.Image] (multi-view).
-            instructions: List[str] natural language task instructions.
-            cfg_scale: >1 enables classifier-free guidance (scales conditional vs unconditional).
-            use_ddim: Whether to use DDIM deterministic sampling.
-            num_ddim_steps: Number of DDIM steps if enabled.
-            **kwargs: Reserved.
-
-        Returns:
-            dict:
-                normalized_actions (np.ndarray): Shape [B, T, action_dim], diffusion-sampled normalized actions.
+        Two-step inference:
+        Step 1 (CoT, optional): Generate spatial grounding text via chat_with_M1.
+        Step 2: Diffusion action prediction conditioned on (augmented) instruction.
         """
-        # align obs and lang # is policy's duty to make sure the image size?
+
+        # --- Resize to training resolution ---
         train_obs_image_size = getattr(self.config.datasets.vla_data, "image_size", None)
         if train_obs_image_size:
             batch_images = resize_images(batch_images, target_size=train_obs_image_size)
-        instructions = [instruction.lower() for instruction in instructions]
 
-        inferface_inputs = self.qwen_vl_interface.build_qwenvl_inputs(images=batch_images, instructions=instructions)
-        qwen_inputs = inferface_inputs
+        # =========================================================
+        # STEP 1 — CoT Grounding (two-step: generate text FIRST)
+        # =========================================================
+        if use_cot_grounding:
+            augmented_instructions = []
+            for imgs, instr in zip(batch_images, instructions):
+                query = cot_grounding_query.replace("{instruction}", instr)
+                # Use primary view (index 0) for grounding generation
+                grounding_output = self.chat_with_M1(
+                    image=imgs[0],
+                    text=query,
+                    max_new_tokens=max_cot_tokens,
+                    device=next(self.parameters()).device,
+                )
+                grounding_text = grounding_output[0].strip() if grounding_output else ""
+                augmented_instructions.append(f"{instr}. {grounding_text}")
+                logger.info(f"[CoT] '{instr[:50]}' → grounding: '{grounding_text[:100]}'")
+            instructions = augmented_instructions
+
+        # =========================================================
+        # STEP 2 — VLM + DINO forward + Diffusion sampling
+        # =========================================================
+        instructions = [i.lower() for i in instructions]
+
+        inferface_inputs = self.qwen_vl_interface.build_qwenvl_inputs(
+            images=batch_images, instructions=instructions
+        )
 
         with torch.autocast("cuda", dtype=torch.bfloat16):
             qwenvl_outputs = self.qwen_vl_interface(
-                **qwen_inputs,
+                **inferface_inputs,
                 output_hidden_states=True,
                 return_dict=True,
             )
 
-            B = len(batch_images) # dino don't have smart resize in processing
+            B = len(batch_images)
             image_tensors = self.dino_encoder.prepare_dino_input(batch_images)
             dino_features = self.dino_encoder(image_tensors)
-
-            B = len(batch_images)
-            dino_encoded_features = dino_features.reshape(B, -1, dino_features.shape[-1])  # [B, num_view * token, dim]
-            dino_encoded_features = self.dino_pro(dino_encoded_features)  # [B, 256, D]
-
-        with torch.autocast("cuda", dtype=torch.bfloat16):
+            dino_encoded_features = dino_features.reshape(B, -1, dino_features.shape[-1])
+            dino_encoded_features = self.dino_pro(dino_encoded_features)
 
             start_layer = self.config.framework.layer_qformer.qformer_start_layer
-            end_layer = self.config.framework.layer_qformer.qformer_end_layer
+            end_layer   = self.config.framework.layer_qformer.qformer_end_layer
             condition_features = qwenvl_outputs.hidden_states[start_layer:end_layer]
+
             cat_conditions = []
             for layer_index in range(len(condition_features)):
-                layer_features = condition_features[layer_index]  # [B, n_qformer_token, D]
-                layer_features = torch.cat(
-                    [layer_features, dino_encoded_features], dim=1
-                )  # [B, n_qformer_token + num_view * token, D]
+                layer_features = condition_features[layer_index]
+                layer_features = torch.cat([layer_features, dino_encoded_features], dim=1)
                 cat_conditions.append(layer_features)
 
             action_condition_feature = self.layer_qformer(cat_conditions)  # [B, 64, D_action]
 
-            using_cfg = cfg_scale > 1.0
-
+            using_cfg  = cfg_scale > 1.0
             model_dtype = next(self.action_model.net.parameters()).dtype
             B = action_condition_feature.shape[0]
 
-            # Sample random noise
             noise = torch.randn(
                 B,
                 self.future_action_window_size + 1,
                 self.action_model.in_channels,
                 device=action_condition_feature.device,
-            ).to(
-                model_dtype
-            )  # [B, T, D]
+            ).to(model_dtype)
 
-            # Setup classifier-free guidance:
             if using_cfg:
-                noise = torch.cat([noise, noise], 0)  # [2,16,7]
-                uncondition = self.action_model.net.z_embedder.uncondition  # [64, 768]
-                uncondition_shape = uncondition.shape
-                uncondition = uncondition.unsqueeze(0)  # [1, 64, D]
-                uncondition = uncondition.expand(
-                    B, uncondition_shape[0], uncondition_shape[1]
-                )  # [B, n_qformer_token, D]
-                z = torch.cat([action_condition_feature, uncondition], 0)  # [2, 64, 768]
-                cfg_scale = cfg_scale
-                model_kwargs = dict(z=z, cfg_scale=cfg_scale)
-                sample_fn = self.action_model.net.forward_with_cfg
+                noise         = torch.cat([noise, noise], dim=0)
+                uncondition   = self.action_model.net.z_embedder.uncondition  # [64, D]
+                uncondition   = uncondition.unsqueeze(0).expand(B, *uncondition.shape)
+                z             = torch.cat([action_condition_feature, uncondition], dim=0)
+                model_kwargs  = dict(z=z, cfg_scale=cfg_scale)
+                sample_fn     = self.action_model.net.forward_with_cfg
             else:
-                model_kwargs = dict(z=action_condition_feature)
-                sample_fn = self.action_model.net.forward
+                model_kwargs  = dict(z=action_condition_feature)
+                sample_fn     = self.action_model.net.forward
 
-            # DDIM Sampling
             if use_ddim and num_ddim_steps is not None:
                 if self.action_model.ddim_diffusion is None:
                     self.action_model.create_ddim(ddim_step=num_ddim_steps)
@@ -282,12 +279,11 @@ class InternVLA_M1(baseframework):
                 )
 
             if using_cfg:
-                samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
+                samples, _ = samples.chunk(2, dim=0)
+
             normalized_actions = samples.cpu().numpy()
-            
-            raw_actions = None
-     
-        return {"normalized_actions": normalized_actions}  # [B, T, action_dim]
+
+        return {"normalized_actions": normalized_actions}
 
 
     @torch.inference_mode()

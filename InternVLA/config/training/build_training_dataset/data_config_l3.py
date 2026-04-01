@@ -92,7 +92,6 @@ class OxeDroidDataConfig:
 
     def transform(self):
         transforms = [
-            # video transforms
             VideoToTensor(apply_to=self.video_keys),
             VideoCrop(apply_to=self.video_keys, scale=0.95),
             VideoResize(apply_to=self.video_keys, height=224, width=224, interpolation="linear"),
@@ -104,7 +103,6 @@ class OxeDroidDataConfig:
                 hue=0.08,
             ),
             VideoToNumpy(apply_to=self.video_keys),
-            # state transforms
             StateActionToTensor(apply_to=self.state_keys),
             StateActionTransform(
                 apply_to=self.state_keys,
@@ -116,7 +114,6 @@ class OxeDroidDataConfig:
                     "state.eef_rotation": "rotation_6d",
                 },
             ),
-            # action transforms
             StateActionToTensor(apply_to=self.action_keys),
             StateActionTransform(
                 apply_to=self.action_keys,
@@ -125,18 +122,17 @@ class OxeDroidDataConfig:
                 },
                 target_rotations={"action.eef_rotation_delta": "axis_angle"},
             ),
-            # concat transforms
             ConcatTransform(
                 video_concat_order=self.video_keys,
                 state_concat_order=self.state_keys,
                 action_concat_order=self.action_keys,
             ),
-            GR00TTransform(
-                state_horizon=len(self.observation_indices),
-                action_horizon=len(self.action_indices),
-                max_state_dim=64,
-                max_action_dim=32,
-            ),
+            # GR00TTransform(
+            #     state_horizon=len(self.observation_indices),
+            #     action_horizon=len(self.action_indices),
+            #     max_state_dim=64,
+            #     max_action_dim=32,
+            # ),
         ]
 
         return ComposedModalityTransform(transforms=transforms)
@@ -199,19 +195,6 @@ class OxeBridgeDataConfig:
 
     def transform(self):
         transforms = [
-            # video transforms
-            # VideoToTensor(apply_to=self.video_keys),
-            # VideoCrop(apply_to=self.video_keys, scale=0.95),
-            # VideoResize(apply_to=self.video_keys, height=224, width=224, interpolation="linear"),
-            # VideoColorJitter(
-            #     apply_to=self.video_keys,
-            #     brightness=0.3,
-            #     contrast=0.4,
-            #     saturation=0.5,
-            #     hue=0.08,
-            # ),
-            # VideoToNumpy(apply_to=self.video_keys),
-            # state transforms
             StateActionToTensor(apply_to=self.state_keys),
             StateActionTransform(
                 apply_to=self.state_keys,
@@ -226,7 +209,6 @@ class OxeBridgeDataConfig:
                     "state.gripper": "binary",
                 },
             ),
-            # action transforms
             StateActionToTensor(apply_to=self.action_keys),
             StateActionTransform(
                 apply_to=self.action_keys,
@@ -240,18 +222,6 @@ class OxeBridgeDataConfig:
                     "action.gripper": "binary",
                 },
             ),
-            # concat transforms
-            # ConcatTransform(
-            #     # video_concat_order=self.video_keys,
-            #     state_concat_order=self.state_keys,
-            #     action_concat_order=self.action_keys,
-            # ),
-            # GR00TTransform(
-            #     state_horizon=len(self.observation_indices),
-            #     action_horizon=len(self.action_indices),
-            #     max_state_dim=64,
-            #     max_action_dim=32,
-            # ),
         ]
 
         return ComposedModalityTransform(transforms=transforms)
@@ -313,19 +283,6 @@ class OxeRT1DataConfig:
 
     def transform(self):
         transforms = [
-            # video transforms
-            # VideoToTensor(apply_to=self.video_keys),
-            # VideoCrop(apply_to=self.video_keys, scale=0.95),
-            # VideoResize(apply_to=self.video_keys, height=224, width=224, interpolation="linear"),
-            # VideoColorJitter(
-            #     apply_to=self.video_keys,
-            #     brightness=0.3,
-            #     contrast=0.4,
-            #     saturation=0.5,
-            #     hue=0.08,
-            # ),
-            # VideoToNumpy(apply_to=self.video_keys),
-            # state transforms
             StateActionToTensor(apply_to=self.state_keys),
             StateActionTransform(
                 apply_to=self.state_keys,
@@ -340,7 +297,6 @@ class OxeRT1DataConfig:
                     "state.gripper": "binary",
                 },
             ),
-            # action transforms
             StateActionToTensor(apply_to=self.action_keys),
             StateActionTransform(
                 apply_to=self.action_keys,
@@ -354,18 +310,6 @@ class OxeRT1DataConfig:
                     "action.gripper": "binary",
                 },
             ),
-            # concat transforms
-            # ConcatTransform(
-            #     # video_concat_order=self.video_keys,
-            #     state_concat_order=self.state_keys,
-            #     action_concat_order=self.action_keys,
-            # ),
-            # GR00TTransform(
-            #     state_horizon=len(self.observation_indices),
-            #     action_horizon=len(self.action_indices),
-            #     max_state_dim=64,
-            #     max_action_dim=32,
-            # ),
         ]
 
         return ComposedModalityTransform(transforms=transforms)
@@ -420,7 +364,6 @@ class SingleFrankaRobotiqDeltaEefDataConfig:
 
     def transform(self):
         transforms = [
-            # state transforms
             StateActionToTensor(apply_to=self.state_keys),
             StateActionTransform(
                 apply_to=self.state_keys,
@@ -429,7 +372,6 @@ class SingleFrankaRobotiqDeltaEefDataConfig:
                     "state.eef_rotation": "min_max",
                 },
             ),
-            # action transforms
             StateActionToTensor(apply_to=self.action_keys),
             StateActionTransform(
                 apply_to=self.action_keys,
@@ -504,7 +446,6 @@ class Libero4in1DataConfig:
 
     def transform(self):
         transforms = [
-            # action transforms
             StateActionToTensor(apply_to=self.action_keys),
             StateActionTransform(
             apply_to=self.action_keys,
@@ -567,36 +508,34 @@ class SingleFrankaRobotiqDeltaJointsDataConfig:
         return modality_configs
 
     def transform(self):
-        transforms = [
-            # state transforms
-            StateActionToTensor(apply_to=self.state_keys),
-            StateActionTransform(
-                apply_to=self.state_keys,
-                normalization_modes={
-                    "state.joints": "min_max",
-                },
-            ),
-            # action transforms
-            StateActionToTensor(apply_to=self.action_keys),
-            StateActionTransform(
-                apply_to=self.action_keys,
-                normalization_modes={
-                    "action.delta_joints": "min_max",
-                    "action.gripper_close": "binary",
-                },
-            ),
-        ]
+        pass
 
-        return ComposedModalityTransform(transforms=transforms)
 
+###########################################################################################
+# NOTA: La classe seguente è una copia di Libero4in1DataConfig.
+# La logica di selezione dei file .bddl per "libero_goal_l3_finetune" NON risiede qui.
+# Risiede nel data loader (es. InternVLA/dataloader/lerobot_datasets.py) che interpreta
+# la stringa "data_mix". Per implementare la selezione dei file e il controllo
+# su MAX_EPISODES_PER_TASK, è necessario modificare quel file per:
+# 1. Riconoscere "libero_goal_l3_finetune".
+# 2. Eseguire una glob per trovare i file `*_syn_l3_v*` nel BDDL_ROOT.
+# 3. Leggere `cfg.datasets.vla_data.max_episodes_per_task` e limitare i dati caricati.
+class LiberoGoalL3DataConfig(Libero4in1DataConfig):
+    """
+    Data config for LIBERO-Goal L3 syntactic fine-tuning.
+    This class inherits from Libero4in1DataConfig as the data modalities and transforms are identical.
+    The actual selection of `_syn_l3_v*` files and limiting episodes per task
+    must be handled inside the data loader script (e.g., `lerobot_datasets.py`)
+    by interpreting the `data_mix` and a new `max_episodes_per_task` parameter from the config.
+    """
+    pass
 
 ###########################################################################################
 
 
-
 ROBOT_TYPE_CONFIG_MAP = {
     "libero_franka": Libero4in1DataConfig(),
-    "libero_goal_l3_finetune": Libero4in1DataConfig(),
+    "libero_goal_l3_finetune": LiberoGoalL3DataConfig(), # Aggiunta nuova registrazione
     "oxe_droid": OxeDroidDataConfig(),
     "oxe_bridge": OxeBridgeDataConfig(),
     "oxe_rt1": OxeRT1DataConfig(),

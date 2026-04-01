@@ -8,6 +8,15 @@ import torch.distributed as dist
 from pathlib import Path
 from InternVLA.dataloader.vlm_datasets import make_vlm_dataloader
 
+import random
+import torch
+from torch.utils.data.distributed import DistributedSampler
+
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
 logger = get_logger(__name__)
 
 def save_dataset_statistics(dataset_statistics, run_dir):
@@ -33,31 +42,50 @@ def save_dataset_statistics(dataset_statistics, run_dir):
 
 
 
-def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"): # TODO now here only is get dataset, we need mv dataloader to here
+def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"):
 
     if dataset_py == "lerobot_datasets":
         from InternVLA.dataloader.lerobot_datasets import get_vla_dataset, collate_fn
         vla_dataset_cfg = cfg.datasets.vla_data
 
-        data_root_dir = vla_dataset_cfg.data_root_dir
-        data_mix = vla_dataset_cfg.data_mix
+        vla_dataset = get_vla_dataset(data_cfg=vla_dataset_cfg, seed=cfg.seed)
 
-        vla_dataset = get_vla_dataset(data_cfg=vla_dataset_cfg)
-        
+        base_seed = int(getattr(cfg, "seed", 42))
+
+        sampler = None
+        if dist.is_initialized():
+            sampler = DistributedSampler(
+                vla_dataset,
+                num_replicas=dist.get_world_size(),
+                rank=dist.get_rank(),
+                shuffle=True,
+                seed=base_seed,
+                drop_last=False,
+            )
+
+        generator = torch.Generator()
+        generator.manual_seed(base_seed)
+
         vla_train_dataloader = DataLoader(
             vla_dataset,
             batch_size=cfg.datasets.vla_data.per_device_batch_size,
             collate_fn=collate_fn,
             num_workers=8,
-            # shuffle=True
-        )        
-        if dist.get_rank() == 0: 
-            
+            sampler=sampler,
+            shuffle=(sampler is None),
+            worker_init_fn=seed_worker,
+            generator=generator,
+            pin_memory=True,
+            drop_last=False,
+        )
+
+        if (not dist.is_initialized()) or dist.get_rank() == 0:
             output_dir = Path(cfg.output_dir)
             vla_dataset.save_dataset_statistics(output_dir / "dataset_statistics.json")
+
         return vla_train_dataloader
+
     elif dataset_py == "vlm_datasets":
         vlm_data_module = make_vlm_dataloader(cfg)
         vlm_train_dataloader = vlm_data_module["train_dataloader"]
-        
         return vlm_train_dataloader

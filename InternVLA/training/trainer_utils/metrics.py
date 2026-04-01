@@ -47,7 +47,6 @@ def normalize_dotlist_args(args):
             pass  # skip orphaned values
     return normalized
 
-
 def build_param_lr_groups(model, cfg):
     """
     build multiple param groups based on cfg.trainer.learning_rate.
@@ -75,14 +74,14 @@ def build_param_lr_groups(model, cfg):
         try:
             for attr in module_name.split("."):
                 module = getattr(module, attr)
-            params = list(module.parameters())
+            params = [p for p in module.parameters() if p.requires_grad]
             param_groups.append({"params": params, "lr": lr, "name": module_name})
             used_params.update(id(p) for p in params)
         except AttributeError:
             ReferenceError(f"⚠️ module path `{module_name}` not found in vla")
 
     # assign base learning rate to the remaining unused parameters
-    other_params = [p for p in model.parameters() if id(p) not in used_params]
+    other_params = [p for p in model.parameters() if id(p) not in used_params and p.requires_grad]
     if other_params:
         param_groups.append({"params": other_params, "lr": base_lr, "name": "base"})
 
@@ -131,47 +130,37 @@ import torch.distributed as dist
 class TrainerUtils:
     @staticmethod
     def freeze_backbones(model, freeze_modules=""):
-        """
-        directly freeze the specified submodules based on the relative module path list (patterns), no longer recursively find all submodule names:
-          - patterns: read from config.trainer.freeze_modules, separated by commas to get the "relative path" list
-            for example "qwen_vl_interface, action_model.net",
-            it means to freeze model.qwen_vl_interface and model.action_model.net.
-
-        Args:
-            model: nn.Module model object
-            freeze_modules: relative module path list (patterns)
-
-        Returns:
-            model: nn.Module model object
-        return:
-          - model:
-        """
         frozen = []
-        print("#"*30)
-        print(freeze_modules)
-        if freeze_modules and type(freeze_modules) == str:
-            # split and remove whitespace
-            patterns = [p.strip() for p in freeze_modules.split(",") if p.strip()] if freeze_modules else []
+        if freeze_modules and isinstance(freeze_modules, str):
+            patterns = [p.strip() for p in freeze_modules.split(",") if p.strip()]
 
             for path in patterns:
-                # split the "relative path" by dots, for example "action_model.net" → ["action_model", "net"]
-                attrs = path.split(".")
                 module = model
                 try:
-                    for attr in attrs:
+                    for attr in path.split("."):
                         module = getattr(module, attr)
-                    # if the module is successfully get, freeze it and its all submodule parameters
+
                     for param in module.parameters():
                         param.requires_grad = False
+
+                    module.eval()
                     frozen.append(path)
+
                 except AttributeError:
-                    # if the attribute does not exist, skip and print warning
                     print(f"⚠️ module path does not exist, cannot freeze: {path}")
                     continue
 
-        dist.barrier()  # synchronize when distributed training
-        if dist.get_rank == 0:
-            print(f"🔒 Frozen modules with re pattern: {frozen}")
+        if dist.is_initialized():
+            dist.barrier()
+
+        if (not dist.is_initialized()) or dist.get_rank() == 0:
+            print(f"🔒 Frozen modules: {frozen}")
+            for path in frozen:
+                module = model
+                for attr in path.split("."):
+                    module = getattr(module, attr)
+                print(f"   - {path}: training={module.training}")
+
         return model
 
     @staticmethod

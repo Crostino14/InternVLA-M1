@@ -6,6 +6,7 @@ train.py
 import argparse
 import json
 import os
+import random
 from pathlib import Path
 from typing import Tuple
 from torch.utils.data import Dataset, DataLoader
@@ -119,6 +120,22 @@ def setup_optimizer_and_scheduler(model, cfg) -> Tuple[torch.optim.Optimizer, to
 
     return optimizer, lr_scheduler
 
+def seed_everything(seed: int, deterministic: bool = False):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    set_seed(seed)
+
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        try:
+            torch.use_deterministic_algorithms(True)
+        except Exception:
+            pass
+
 
 class VLATrainer(TrainerUtils):
     def __init__(self, cfg, model, vla_train_dataloader, optimizer, lr_scheduler, accelerator):
@@ -130,13 +147,13 @@ class VLATrainer(TrainerUtils):
         self.accelerator = accelerator
 
         # training status tracking
-        self.completed_steps = 0
+        self.completed_steps = getattr(self.config.trainer, "resume_step", 0)
         self.total_batch_size = self._calculate_total_batch_size()
 
     def prepare_training(self):
         rank = dist.get_rank() if dist.is_initialized() else 0
-        seed = self.config.seed + rank if hasattr(self.config, "seed") else rank + 3047
-        set_seed(seed)
+        self.process_seed = int(getattr(self.config, "seed", 42)) + rank
+        #set_seed(seed)
 
         # load pretrained weights
         if hasattr(self.config.trainer, "pretrained_checkpoint") and self.config.trainer.pretrained_checkpoint:
@@ -146,17 +163,6 @@ class VLATrainer(TrainerUtils):
             )
             self.model = self.load_pretrained_backbones(self.model, pretrained_checkpoint, reload_modules=reload_modules)
 
-        # freeze parameters
-        freeze_modules = (
-            self.config.trainer.freeze_modules
-            if (self.config and hasattr(self.config.trainer, "freeze_modules"))
-            else None
-        )
-        self.model = self.freeze_backbones(self.model, freeze_modules=freeze_modules)
-
-        #  print model trainable parameters:
-        self.print_trainable_parameters(self.model)
-
         # initialize distributed training components
         self.model, self.optimizer, self.vla_train_dataloader = self.setup_distributed_training(
             self.accelerator,  # must be the first param
@@ -165,9 +171,31 @@ class VLATrainer(TrainerUtils):
             self.vla_train_dataloader,
             # self.vlm_train_dataloader
         )
+        
+        self.vla_epoch_count = 0
+
+        #  print model trainable parameters:
+        self.print_trainable_parameters(self.model)
+        
+        if self.accelerator.is_main_process:
+            qwen_total = 0
+            qwen_trainable = 0
+            for name, param in self.model.named_parameters():
+                if name.startswith("qwen_vl_interface."):
+                    qwen_total += param.numel()
+                    if param.requires_grad:
+                        qwen_trainable += param.numel()
+            print(f"Qwen total params: {qwen_total}")
+            print(f"Qwen trainable params: {qwen_trainable}")
 
         self._init_wandb()
         self._init_checkpointing()
+        
+        if hasattr(self.vla_train_dataloader, "sampler") and hasattr(self.vla_train_dataloader.sampler, "set_epoch"):
+            self.vla_train_dataloader.sampler.set_epoch(self.vla_epoch_count)
+
+        if hasattr(self.vla_train_dataloader, "dataset") and hasattr(self.vla_train_dataloader.dataset, "set_epoch"):
+            self.vla_train_dataloader.dataset.set_epoch(self.vla_epoch_count)
 
     def _calculate_total_batch_size(self):
         """calculate global batch size"""
@@ -178,27 +206,63 @@ class VLATrainer(TrainerUtils):
         )
 
     def _init_wandb(self):
-        """initialize Weights & Biases"""
         if self.accelerator.is_main_process:
+            resume_step = getattr(self.config.trainer, "resume_step", 0)
             wandb.init(
                 name=self.config.run_id,
+                id=self.config.run_id,           # ID deterministico basato sul run_id
                 dir=os.path.join(self.config.output_dir, "wandb"),
                 project=self.config.wandb_project,
                 entity=self.config.wandb_entity,
                 group="vla-train",
+                resume="allow",                  # riprende la run esistente se esiste
             )
+            if resume_step > 0:
+                wandb.config.update({"resumed_from_step": resume_step}, allow_val_change=True)
 
     def _init_checkpointing(self):
-        """initialize checkpoint directory"""
         self.checkpoint_dir = os.path.join(self.config.output_dir, "checkpoints")
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
-        pretrained_checkpoint = getattr(self.config.trainer, "pretrained_checkpoint", None)
-        is_resume = getattr(self.config.trainer, "is_resume", False)
+        resume_step = getattr(self.config.trainer, "resume_step", 0)
+        if resume_step <= 0:
+            return
 
-        # resume training state
-        if pretrained_checkpoint and is_resume:
-            self._load_checkpoint(self.config.resume_from_checkpoint)
+        # Prima opzione: carica lo stato salvato (esatto)
+        training_state_path = os.path.join(
+            self.checkpoint_dir, f"steps_{resume_step}_training_state.pt"
+        )
+        if os.path.exists(training_state_path):
+            training_state = torch.load(training_state_path, map_location="cpu")
+            self.lr_scheduler.load_state_dict(training_state["lr_scheduler_state"])
+            self.optimizer.load_state_dict(training_state["optimizer_state"])
+            if "python_random_state" in training_state:
+                random.setstate(training_state["python_random_state"])
+            if "numpy_random_state" in training_state:
+                np.random.set_state(training_state["numpy_random_state"])
+            if "torch_random_state" in training_state:
+                torch.set_rng_state(training_state["torch_random_state"])
+            if "cuda_random_state" in training_state:
+                torch.cuda.set_rng_state_all(training_state["cuda_random_state"])
+                
+            self.vla_epoch_count = training_state.get("vla_epoch_count", 0)
+
+            logger.info(
+                f"Loaded LR scheduler state from {training_state_path}. "
+                f"Current LR: {self.lr_scheduler.get_last_lr()}"
+            )
+        else:
+            # Fallback: avanza manualmente (meno preciso ma funziona)
+            logger.warning(
+                f"training_state.pt not found for step {resume_step}, "
+                f"advancing scheduler manually..."
+            )
+            for _ in range(resume_step):
+                self.lr_scheduler.step()
+            logger.info(
+                f"Manually advanced scheduler to step {resume_step}. "
+                f"Current LR: {self.lr_scheduler.get_last_lr()}"
+            )
 
     def _load_checkpoint(self, checkpoint_path):
         """load checkpoint"""
@@ -207,18 +271,26 @@ class VLATrainer(TrainerUtils):
 
     def _save_checkpoint(self):
         """save current training state"""
-
         if accelerator.is_main_process:
-
             checkpoint_path = os.path.join(self.checkpoint_dir, f"steps_{self.completed_steps}")
-            # save model state
+
+            # salva pesi modello (già presente)
             state_dict = self.accelerator.get_state_dict(self.model)
             torch.save(state_dict, checkpoint_path + "_pytorch_model.pt")
 
-            # save training metadata
-            summary_data = {
+            training_state = {
                 "steps": self.completed_steps,
+                "lr_scheduler_state": self.lr_scheduler.state_dict(),
+                "optimizer_state": self.optimizer.state_dict(),
+                "python_random_state": random.getstate(),
+                "numpy_random_state": np.random.get_state(),
+                "torch_random_state": torch.get_rng_state(),
+                "cuda_random_state": torch.cuda.get_rng_state_all(),
+                "vla_epoch_count": getattr(self, "vla_epoch_count", 0),
             }
+            torch.save(training_state, checkpoint_path + "_training_state.pt")
+
+            summary_data = {"steps": self.completed_steps}
             with open(os.path.join(self.config.output_dir, "summary.jsonl"), "a") as f:
                 f.write(json.dumps(summary_data) + "\n")
             self.accelerator.print(f"✅ Checkpoint saved at {checkpoint_path}")
@@ -245,15 +317,20 @@ class VLATrainer(TrainerUtils):
         # self.vlm_iter = iter(self.vlm_train_dataloader)
 
     def _get_next_batch(self):
-        """get next batch (automatically handle data loop)"""
         try:
             batch_vla = next(self.vla_iter)
         except StopIteration:
             if not hasattr(self, "vla_epoch_count"):
                 self.vla_epoch_count = 0
-            self.vla_iter, self.vla_epoch_count = TrainerUtils._reset_dataloader(
-                self.vla_train_dataloader, self.vla_epoch_count
-            )
+            self.vla_epoch_count += 1
+
+            if hasattr(self.vla_train_dataloader, "sampler") and hasattr(self.vla_train_dataloader.sampler, "set_epoch"):
+                self.vla_train_dataloader.sampler.set_epoch(self.vla_epoch_count)
+
+            if hasattr(self.vla_train_dataloader, "dataset") and hasattr(self.vla_train_dataloader.dataset, "set_epoch"):
+                self.vla_train_dataloader.dataset.set_epoch(self.vla_epoch_count)
+
+            self.vla_iter = iter(self.vla_train_dataloader)
             batch_vla = next(self.vla_iter)
 
         return batch_vla
@@ -267,8 +344,13 @@ class VLATrainer(TrainerUtils):
         self._create_data_iterators()
 
         # create progress bar
+        remaining_steps = self.config.trainer.max_train_steps - self.completed_steps
         progress_bar = tqdm(
-            range(self.config.trainer.max_train_steps), disable=not self.accelerator.is_local_main_process
+            range(remaining_steps),
+            initial=0,
+            total=remaining_steps,
+            desc=f"Training (resumed from step {self.completed_steps})",
+            disable=not self.accelerator.is_local_main_process,
         )
 
         # main training loop
@@ -397,11 +479,24 @@ class VLATrainer(TrainerUtils):
 
 def main(cfg) -> None:
     logger.info("VLA Training :: Warming Up")
+    
+    base_seed = int(getattr(cfg, "seed", 42))
+    seed_everything(base_seed, deterministic=True)
 
     # create output directory and save config
     output_dir = setup_directories(cfg=cfg)
     # build model
     vla = build_framework(cfg)
+    
+    freeze_modules = (
+    cfg.trainer.freeze_modules
+            if (cfg and hasattr(cfg.trainer, "freeze_modules"))
+            else None
+        )
+    if freeze_modules and freeze_modules.lower() not in ("none", "null", ""):
+        vla = TrainerUtils.freeze_backbones(vla, freeze_modules=freeze_modules)
+        
+    print("AFTER FREEZE qwen_vl_interface.training =", vla.qwen_vl_interface.training)
     # prepare data
     vla_train_dataloader = prepare_data(cfg=cfg, accelerator=accelerator, output_dir=output_dir)
 
