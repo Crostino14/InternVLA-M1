@@ -20,7 +20,7 @@ from plotly.subplots import make_subplots
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
-DEFAULT_BASE_DIR  = "/mnt/beegfs/a.cardamone7/checkpoints/InternVLA_L3_finetune_libero_goal"
+DEFAULT_BASE_DIR  = "/mnt/beegfs/a.cardamone7/checkpoints/InternVLA_L3_Variations_finetune_libero_goal"
 DEFAULT_OUT_DIR   = "./output/training_plots"
 
 RUNS = {

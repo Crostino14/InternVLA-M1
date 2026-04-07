@@ -66,9 +66,9 @@ TASK_MAX_STEPS = {
 }
 
 SPATIAL_COT_PROMPT = (
-    "{instruction}. First, identify key objects and their positions using  spatial relations: left/right of, in front/behind, next to, above/below. Then execute the action."
+    "Your task is {instruction}. First, identify key objects and their positions using spatial relations: "
+    "left/right of, in front/behind, next to, above/below. Then execute the action."
 )
-
 
 def log_message(message: str, log_file=None):
     logger.info(message)
@@ -239,7 +239,7 @@ def save_vlm_bbox_frame(frame_dir: str, timestep: int, agentview: np.ndarray,
 class InternVLA_M1_policy:
     """Policy wrapper for InternVLA-M1."""
 
-    def __init__(self, model_path: str, device: str = "cuda", use_cot: bool = False):
+    def __init__(self, model_path: str, device: str = "cuda", use_cot: bool = True):
         from InternVLA.model.framework.share_tools import read_mode_config
         from omegaconf import OmegaConf
 
@@ -254,6 +254,10 @@ class InternVLA_M1_policy:
         state_dict = torch.load(model_path, map_location="cpu")
         missing, unexpected = self.model.load_state_dict(state_dict, strict=False)
         log_message(f"Loaded checkpoint with {len(missing)} missing keys and {len(unexpected)} unexpected keys")
+        if missing:
+            print(f"⚠️ MISSING KEYS (first 10): {missing[:10]}")
+        if unexpected:
+            print(f"⚠️ UNEXPECTED KEYS (first 10): {unexpected[:10]}")
 
         self.model = self.model.to(device).eval()
         self.device = device
@@ -263,12 +267,10 @@ class InternVLA_M1_policy:
         
         EMBODIMENT_KEY = "franka"
         if EMBODIMENT_KEY not in norm_stats:
-            available = list(norm_stats.keys())
-            log_message(
-                f"WARNING: '{EMBODIMENT_KEY}' not in norm_stats. "
-                f"Available: {available}. Using '{available[0]}' as fallback."
-            )
-            EMBODIMENT_KEY = available[0]
+            fallback = "new_embodiment" if "new_embodiment" in norm_stats else list(norm_stats.keys())[0]
+            log_message(f"WARNING: '{EMBODIMENT_KEY}' not in norm_stats. "
+                        f"Available: {list(norm_stats.keys())}. Using '{fallback}' as fallback.")
+            EMBODIMENT_KEY = fallback
 
         # Unnormalization stats
         action_stats      = norm_stats[EMBODIMENT_KEY]["action"]
@@ -291,15 +293,15 @@ class InternVLA_M1_policy:
         print("=== PREDICTION INSTRUCTION ===")
         print(instruction)
         
-        proc = self.model.qwen_vl_interface.processor
-        dummy_msg = [{"role": "user", "content": [
-            {"type": "image", "image": Image.fromarray(agentview_img)},
-            {"type": "image", "image": Image.fromarray(wrist_img)},
-            {"type": "text",  "text": instruction}
-        ]}]
-        dummy_text   = proc.apply_chat_template(dummy_msg, tokenize=False, add_generation_prompt=True)
-        n_img_tokens = dummy_text.count("<|image_pad|>")
-        print(f"[DEBUG] image_tokens={n_img_tokens} (attesi: ≥2) | '{instruction}'", flush=True)
+        #proc = self.model.qwen_vl_interface.processor
+        #dummy_msg = [{"role": "user", "content": [
+        #    {"type": "image", "image": Image.fromarray(agentview_img)},
+        #    {"type": "image", "image": Image.fromarray(wrist_img)},
+        #    {"type": "text",  "text": instruction}
+        #]}]
+        #dummy_text   = proc.apply_chat_template(dummy_msg, tokenize=False, add_generation_prompt=True)
+        #n_img_tokens = dummy_text.count("<|image_pad|>")
+        #print(f"[DEBUG] image_tokens={n_img_tokens} (attesi: ≥2) | '{instruction}'", flush=True)
 
         view1 = Image.fromarray(agentview_img)
         view2 = Image.fromarray(wrist_img)
@@ -311,13 +313,13 @@ class InternVLA_M1_policy:
                 use_ddim=True,
                 num_ddim_steps=num_ddim_steps,
             )
-        print(f"[DEBUG] pred keys: {list(pred.keys())}", flush=True)
+        #print(f"[DEBUG] pred keys: {list(pred.keys())}", flush=True)
         normalized = np.clip(pred["normalized_actions"][0], -1, 1)  # [T, 7]
+        #print(f"[DEBUG] normalized actions mean={normalized.mean():.4f} std={normalized.std():.4f} min={normalized.min():.4f} max={normalized.max():.4f}")
+        #print(f"[DEBUG] action_low={self.action_low}, action_high={self.action_high}")
+        #print(f"[DEBUG] action_mask={self.action_mask}")
         
-        img_hash = int(np.sum(agentview_img.astype(np.int64)) % 1e9)
-        print(f"[ACTION DEBUG] img_hash={img_hash} | "
-            f"actions[0]={normalized[0].round(4).tolist()} | "
-            f"actions[-1]={normalized[-1].round(4).tolist()}", flush=True)
+        #img_hash = int(np.sum(agentview_img.astype(np.int64)) % 1e9)
 
         # Gripper (dim 6): threshold sul normalized raw — come nel codice ufficiale
         normalized[:, 6] = np.where(normalized[:, 6] < 0.5, 0.0, 1.0)
@@ -328,6 +330,7 @@ class InternVLA_M1_policy:
             0.5 * (normalized + 1) * (self.action_high - self.action_low) + self.action_low,
             normalized,
         )
+        #print(f"[DEBUG] final actions={actions[0]}")
         if not return_metadata:
             return actions  # [T, 7], gripper in {0.0, 1.0}
 
@@ -456,7 +459,11 @@ def run_episode(
                     #            log_file,
                     #        )
                 else:
-                    current_chunk = policy.predict(agentview, wrist, task_description)
+                    current_chunk = policy.predict(
+                                                    agentview, wrist, task_description,
+                                                    cfg_scale=cfg.cfg_scale,
+                                                    num_ddim_steps=cfg.num_ddim_steps,
+                                                    )
                 # current_chunk: [chunk_size, 7]
 
             # Esegui l'azione corrente nel chunk
@@ -505,24 +512,38 @@ def run_task(cfg, task_suite, task_id, policy, log_file,
 
     # ── Discovery delle versioni disponibili ──────────────────────────────
     available_versions = []
-    if cfg.change_command and cfg.command_level is not None and cfg.use_versions:
-        # cerca _syn_l3_v1, _syn_l3_v2, etc.
-        base_name = task.bddl_file.replace('.bddl', '')
+    has_base_syn = False
+    base_syn_filename = None
+
+    if cfg.change_command and cfg.command_level is not None:
+        base_name = task.bddl_file.replace(".bddl", "")
         try:
             from libero.libero import get_libero_path
             bddl_folder = os.path.join(get_libero_path("bddl_files"), task.problem_folder)
         except Exception:
             bddl_folder = os.path.dirname(task.bddl_file)
 
+        # file base: *_syn_l3.bddl
+        base_syn_file = f"{base_name}_syn_{cfg.command_level}.bddl"
+        base_syn_path = os.path.join(bddl_folder, os.path.basename(base_syn_file))
+        if os.path.isfile(base_syn_path):
+            has_base_syn = True
+            base_syn_filename = os.path.basename(base_syn_path)
+            log_message(f"Found base syn file: {base_syn_path}", log_file)
+        else:
+            log_message(f"Warning: base syn file not found: {base_syn_path}", log_file)
+
+        # file versionati: *_syn_l3_v1.bddl, *_syn_l3_v2.bddl, ...
         pattern = f"{base_name}_syn_{cfg.command_level}_v"
         try:
             for filename in os.listdir(bddl_folder):
-                if pattern.lower() in filename.lower() and filename.endswith('.bddl'):
-                    match = re.search(r'_v(\d+)', filename, re.IGNORECASE)
+                if pattern.lower() in filename.lower() and filename.endswith(".bddl"):
+                    match = re.search(r"_v(\d+)", filename, re.IGNORECASE)
                     if match:
                         available_versions.append((int(match.group(1)), filename))
         except Exception as e:
             log_message(f"Warning: Could not list version files: {e}", log_file)
+
         available_versions.sort()
 
     elif cfg.change_command and cfg.command_level is not None and not cfg.use_versions:
@@ -544,12 +565,18 @@ def run_task(cfg, task_suite, task_id, policy, log_file,
             log_message(f"Warning: base syn file not found: {base_syn_path}", log_file)
 
     # ── Versioni da testare ───────────────────────────────────────────────
+    # -1  -> file base *_syn_l3.bddl
+    # >=0 -> file versionato *_syn_l3_vN.bddl
     if cfg.selected_version is not None:
         versions_to_test = [cfg.selected_version]
-    elif available_versions:
-        versions_to_test = [v[0] for v in available_versions]
     else:
-        versions_to_test = [None]
+        versions_to_test = []
+        if has_base_syn:
+            versions_to_test.append(-1)   # syn_l3
+        versions_to_test.extend([v[0] for v in available_versions])  # l3_v*
+
+        if not versions_to_test:
+            versions_to_test = [None]
 
     log_message("=" * 80, log_file)
     log_message(f"TASK {task_id + 1}/{task_suite.n_tasks}", log_file)
@@ -561,30 +588,26 @@ def run_task(cfg, task_suite, task_id, policy, log_file,
 
     # ── Loop versioni ─────────────────────────────────────────────────────
     for version_to_test in versions_to_test:
-
         ablation_bddl_file = None
-        if available_versions and version_to_test is not None:
+
+        if version_to_test == -1:
+            version_label = "syn_base"
+            ablation_bddl_file = base_syn_filename
+        elif version_to_test is not None:
+            version_label = f"v{version_to_test}"
             selected_files = [v[1] for v in available_versions if v[0] == version_to_test]
             if selected_files:
                 ablation_bddl_file = selected_files[0]
+        else:
+            version_label = "default"
 
         env, task_description, original_description = get_libero_env(
             task,
-            "tiny_vla",
+            "InternVLA-M1",
             change_command=cfg.change_command,
             command_level=cfg.command_level,
             ablation_bddl_file=ablation_bddl_file,
             resolution=cfg.env_img_res,
-        )
-
-        # Salva la descrizione della prima versione come chiave stabile
-        if task_canonical_description is None:
-            task_canonical_description = original_description
-
-        version_label = (
-            f"v{version_to_test}" if version_to_test is not None and version_to_test >= 0
-            else "syn_base" if version_to_test == -1
-            else "default"
         )
         log_message("=" * 80, log_file)
         log_message(f"Testing VERSION: {version_label}", log_file)
@@ -705,6 +728,8 @@ class GenerateConfig:
     command_level:  Optional[str] = None
     selected_version:  Optional[int] = None
     use_versions: bool = True
+    num_ddim_steps: int   = 10
+    cfg_scale:      float = 1.5
 
     # Logging
     run_id_note:   Optional[str] = None

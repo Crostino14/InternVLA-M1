@@ -30,11 +30,15 @@ from InternVLA.model.framework import build_framework
 from InternVLA.training.trainer_utils.metrics import TrainerUtils
 from InternVLA.training.trainer_utils.metrics import build_param_lr_groups
 
-accelerator = Accelerator()
-accelerator.print(accelerator.state)
+from accelerate import DistributedDataParallelKwargs
+ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
 
 # Sane Defaults
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+os.environ["USE_TF"] = "0"       # impedisce a transformers di caricare TensorFlow
+os.environ["USE_TORCH"] = "1"
 
 
 # Initialize Overwatch =>> Wraps `logging.Logger`
@@ -233,7 +237,7 @@ class VLATrainer(TrainerUtils):
             self.checkpoint_dir, f"steps_{resume_step}_training_state.pt"
         )
         if os.path.exists(training_state_path):
-            training_state = torch.load(training_state_path, map_location="cpu")
+            training_state = torch.load(training_state_path, map_location="cpu", weights_only=False)
             self.lr_scheduler.load_state_dict(training_state["lr_scheduler_state"])
             self.optimizer.load_state_dict(training_state["optimizer_state"])
             if "python_random_state" in training_state:
@@ -407,9 +411,13 @@ class VLATrainer(TrainerUtils):
             actions = [example["action"] for example in examples]  # label
 
             # Predict actions using the model
-            output_dict = self.model.predict_action(
-                batch_images=batch_images, instructions=instructions, use_ddim=True, num_ddim_steps=20
-            )
+            model_unwrapped = self.accelerator.unwrap_model(self.model)
+            model_unwrapped.eval()
+            with torch.no_grad():
+                output_dict = model_unwrapped.predict_action(
+                    batch_images=batch_images, instructions=instructions, use_ddim=True, num_ddim_steps=20
+                )
+            model_unwrapped.train()
 
             normalized_actions = output_dict["normalized_actions"]  # B, T, D
 
@@ -489,19 +497,93 @@ def main(cfg) -> None:
     vla = build_framework(cfg)
     
     freeze_modules = (
-    cfg.trainer.freeze_modules
-            if (cfg and hasattr(cfg.trainer, "freeze_modules"))
-            else None
-        )
+        cfg.trainer.freeze_modules
+        if (cfg and hasattr(cfg.trainer, "freeze_modules"))
+        else None
+    )
     if freeze_modules and freeze_modules.lower() not in ("none", "null", ""):
         vla = TrainerUtils.freeze_backbones(vla, freeze_modules=freeze_modules)
         
-    print("AFTER FREEZE qwen_vl_interface.training =", vla.qwen_vl_interface.training)
+    #print("AFTER FREEZE qwen_vl_interface.training =", vla.qwen_vl_interface.training)
+    
+    # def debug_trainable_params(model: torch.nn.Module, label: str = "MODEL") -> None:
+    #     """
+    #     Stampa per ogni sottomodulo di primo livello:
+    #     - num parametri totali
+    #     - num parametri trainable
+    #     - percentuale trainable
+    #     - .training flag
+    #     """
+    #     print(f"\n{'='*70}")
+    #     print(f"  TRAINABLE PARAMETER AUDIT — {label}")
+    #     print(f"{'='*70}")
+
+    #     module_stats = {}
+    #     for name, param in model.named_parameters():
+    #         top_module = name.split(".")[0]
+    #         if top_module not in module_stats:
+    #             module_stats[top_module] = {"total": 0, "trainable": 0}
+    #         module_stats[top_module]["total"] += param.numel()
+    #         if param.requires_grad:
+    #             module_stats[top_module]["trainable"] += param.numel()
+
+    #     grand_total, grand_trainable = 0, 0
+    #     for mod_name, stats in module_stats.items():
+    #         total     = stats["total"]
+    #         trainable = stats["trainable"]
+    #         pct       = 100.0 * trainable / total if total > 0 else 0.0
+    #         # cerca il sottomodulo per leggere il .training flag
+    #         submod    = getattr(model, mod_name, None)
+    #         train_flag = submod.training if submod is not None else "N/A"
+    #         status    = "✅ TRAINABLE" if trainable > 0 else "🔒 FROZEN"
+    #         print(
+    #             f"  {mod_name:<35} "
+    #             f"trainable={trainable:>12,} / {total:>12,}  "
+    #             f"({pct:5.1f}%)  "
+    #             f".training={train_flag}  {status}"
+    #         )
+    #         grand_total     += total
+    #         grand_trainable += trainable
+
+    #     print(f"{'─'*70}")
+    #     grand_pct = 100.0 * grand_trainable / grand_total if grand_total > 0 else 0.0
+    #     print(
+    #         f"  {'TOTAL':<35} "
+    #         f"trainable={grand_trainable:>12,} / {grand_total:>12,}  "
+    #         f"({grand_pct:5.1f}%)"
+    #     )
+    #     print(f"{'='*70}\n")
+
+    # debug_trainable_params(vla, label="AFTER FREEZE")
+    
+    
     # prepare data
     vla_train_dataloader = prepare_data(cfg=cfg, accelerator=accelerator, output_dir=output_dir)
 
     # set optimizer and scheduler
     optimizer, lr_scheduler = setup_optimizer_and_scheduler(model=vla, cfg=cfg)
+    
+    
+    # def debug_optimizer_groups(optimizer: torch.optim.Optimizer) -> None:
+    #     print(f"\n{'='*70}")
+    #     print(f"  OPTIMIZER PARAMETER GROUPS AUDIT")
+    #     print(f"{'='*70}")
+    #     total_opt_params = 0
+    #     for i, group in enumerate(optimizer.param_groups):
+    #         group_name = group.get("name", f"group_{i}")
+    #         n_tensors  = len(group["params"])
+    #         n_params   = sum(p.numel() for p in group["params"])
+    #         lr         = group.get("lr", "N/A")
+    #         total_opt_params += n_params
+    #         print(
+    #             f"  Group {i:>2} | name={group_name:<30} "
+    #             f"lr={str(lr):<10} "
+    #             f"tensors={n_tensors:>5}  params={n_params:>12,}"
+    #         )
+    #     print(f"{'─'*70}")
+    #     print(f"  TOTAL params in optimizer: {total_opt_params:,}")
+
+    # debug_optimizer_groups(optimizer)
 
     # create trainer
     # Run VLA Training

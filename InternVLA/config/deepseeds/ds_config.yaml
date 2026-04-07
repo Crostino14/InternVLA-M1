@@ -16,12 +16,13 @@
     "zero_optimization": {
         "stage": 2,
         "allgather_partitions": true,
-        "allgather_bucket_size": 5e8,
+        "allgather_bucket_size": 2e8,
         "reduce_scatter": true,
-        "reduce_bucket_size": 5e8,
-        "overlap_comm": true,
+        "reduce_bucket_size": 2e8,
+        "overlap_comm": false,
         "contiguous_gradients": true,
-        "cpu_offload": false
+        "cpu_offload": false,
+        "ignore_unused_parameters": true
     },
     "gradient_clipping": 1.0,
     "steps_per_print": 10

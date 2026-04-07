@@ -47,43 +47,47 @@ def normalize_dotlist_args(args):
             pass  # skip orphaned values
     return normalized
 
-def build_param_lr_groups(model, cfg):
+def build_param_lr_groups(model: torch.nn.Module, cfg) -> list:
     """
-    build multiple param groups based on cfg.trainer.learning_rate.
-    support specifying different learning rates for different modules, the rest use base.
-
-    Args:
-        vla: nn.Module model object
-        cfg: config object, requires cfg.trainer.learning_rate dictionary
-
-    Returns:
-        List[Dict]: param_groups that can be used to build optimizer with torch.optim
+    Costruisce param groups con LR differenziale per modulo.
+    Legge da cfg.trainer.learning_rate:
+      - base        -> LR di default
+      - qformer     -> LR per layer_qformer (opzionale)
+      - action_model -> LR per action_model (opzionale)
+    Esclude automaticamente i parametri con requires_grad=False.
     """
+    lr_cfg    = cfg.trainer.learning_rate
+    base_lr   = float(lr_cfg.base)
+    qf_lr     = float(getattr(lr_cfg, "qformer",      base_lr))
+    act_lr    = float(getattr(lr_cfg, "action_model", base_lr))
 
-    lr_cfg = cfg.trainer.learning_rate
-    base_lr = lr_cfg.get("base", 1e-4)  # default base learning rate
+    # mappa nome_modulo -> lr
+    lr_map = {
+        "layer_qformer": qf_lr,
+        "action_model":  act_lr,
+    }
 
-    used_params = set()
-    param_groups = []
-
-    for module_name, lr in lr_cfg.items():
-        if module_name == "base":
+    # raggruppa per modulo di primo livello
+    groups: dict[str, dict] = {}
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
             continue
-        # try to find the module under vla by module_name (support nested paths)
-        module = model
-        try:
-            for attr in module_name.split("."):
-                module = getattr(module, attr)
-            params = [p for p in module.parameters() if p.requires_grad]
-            param_groups.append({"params": params, "lr": lr, "name": module_name})
-            used_params.update(id(p) for p in params)
-        except AttributeError:
-            ReferenceError(f"⚠️ module path `{module_name}` not found in vla")
+        top = name.split(".")[0]
+        lr  = lr_map.get(top, base_lr)
+        key = f"{top}_lr{lr}"
+        if key not in groups:
+            groups[key] = {"name": key, "params": [], "lr": lr}
+        groups[key]["params"].append(param)
 
-    # assign base learning rate to the remaining unused parameters
-    other_params = [p for p in model.parameters() if id(p) not in used_params and p.requires_grad]
-    if other_params:
-        param_groups.append({"params": other_params, "lr": base_lr, "name": "base"})
+    param_groups = list(groups.values())
+
+    # stampa riepilogo gruppi
+    print(f"\n{'='*60}")
+    print("  PARAM GROUPS BUILT")
+    for g in param_groups:
+        n = sum(p.numel() for p in g["params"])
+        print(f"  {g['name']:<40} lr={g['lr']}  params={n:,}")
+    print(f"{'='*60}\n")
 
     return param_groups
 

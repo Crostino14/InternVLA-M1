@@ -1,14 +1,14 @@
 #!/bin/bash
 #SBATCH --account=did_robot_learning_359
-#SBATCH --job-name=task7_internvla
+#SBATCH --job-name=t7_25_internvla
 #SBATCH --partition=gpuq
 #SBATCH --gres=gpu:1
 #SBATCH --ntasks=1
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
 #SBATCH --array=6,16,26         # 10 task × 3 seed = 30 job
-#SBATCH --output=/mnt/beegfs/a.cardamone7/outputs/logs/TEST_10eps_eval_internvla_task7_%a_%j.out
-#SBATCH --error=/mnt/beegfs/a.cardamone7/outputs/logs/TEST_10eps_eval_internvla_task7_%a_%j.err
+#SBATCH --output=/mnt/beegfs/a.cardamone7/outputs/logs/TEST_FIX_30k_25eps_eval_internvla_task7_%a_%j.out
+#SBATCH --error=/mnt/beegfs/a.cardamone7/outputs/logs/TEST_FIX_30k_25eps_eval_internvla_task7_%a_%j.err
 
 # ── Array → SEED + TASK_INDEX (1 job = 1 task, 1 seed) ──────────────────────
 # ARRAY_ID: 0-9  → seed 0, task 0-9
@@ -21,9 +21,9 @@ TASK_RANGE="${TASK_INDEX}-${TASK_INDEX}"
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 CHANGE_COMMAND=true
-COMMAND_LEVEL="l3"
+COMMAND_LEVEL="l2"
 
-MODEL_PATH="/mnt/beegfs/a.cardamone7/checkpoints/InternVLA_L3_finetune_libero_goal/internvla_l3_eps10_l3_spatial_finetune/checkpoints/steps_46000_pytorch_model.pt"
+MODEL_PATH="/mnt/beegfs/a.cardamone7/checkpoints/InternVLA_L3_Variations_finetune_libero_goal/internvla_l3_eps25_l3_spatial_finetune/checkpoints/steps_30000_pytorch_model.pt"
 TASK_SUITE="libero_goal"
 
 WORK_DIR="/home/A.CARDAMONE7/repo/VLA-Bench/robosuite_test/InternVLA-M1/libero_test"
@@ -35,7 +35,7 @@ NUM_TRIALS_PER_TASK=50
 NUM_STEPS_WAIT=10
 ENV_IMG_RES=256
 
-ID_NOTE="TEST_10eps_internvla_${TASK_SUITE}_${COMMAND_LEVEL}_seed${SEED}_task${TASK_INDEX}"
+ID_NOTE="TEST_FIX_30k_25eps_internvla_${COMMAND_LEVEL}_seed${SEED}_task${TASK_INDEX}"
 
 # ── Environment ───────────────────────────────────────────────────────────────
 export MUJOCO_PY_MUJOCO_PATH=$HOME/.mujoco/mujoco210
@@ -71,7 +71,8 @@ srun python run_internvla_libero_eval.py \
   --seed                ${SEED}               \
   --run_number          ${SEED}               \
   --use_cot             true                   \
-  --selected_version    1                      \
+  --use_versions True                         \
+  --num_ddim_steps       20                   \
   --num_trials_per_task ${NUM_TRIALS_PER_TASK} \
   --num_steps_wait      ${NUM_STEPS_WAIT}     \
   --env_img_res         ${ENV_IMG_RES}        \

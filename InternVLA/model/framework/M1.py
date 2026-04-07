@@ -211,7 +211,7 @@ class InternVLA_M1(baseframework):
         # =========================================================
         # STEP 2 — VLM + DINO forward + Diffusion sampling
         # =========================================================
-        instructions = [i.lower() for i in instructions]
+        #instructions = [i.lower() for i in instructions]
 
         inferface_inputs = self.qwen_vl_interface.build_qwenvl_inputs(
             images=batch_images, instructions=instructions

@@ -1,15 +1,15 @@
 #!/bin/bash
 
 #SBATCH --account=did_robot_learning_359
-#SBATCH --job-name=10eps_finetune_internvla_libero_goal_l3
+#SBATCH --job-name=25eps_finetune_internvla_libero_goal_l3
 #SBATCH --partition=gpuq
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=64
 #SBATCH --exclusive
-#SBATCH --output=/mnt/beegfs/a.cardamone7/outputs/logs/finetune_10eps_internvla_l3_%j.out
-#SBATCH --error=/mnt/beegfs/a.cardamone7/outputs/logs/finetune_10eps_internvla_l3_%j.err
+#SBATCH --output=/mnt/beegfs/a.cardamone7/outputs/logs/TEST_finetune_25eps_internvla_l3_%j.out
+#SBATCH --error=/mnt/beegfs/a.cardamone7/outputs/logs/TEST_finetune_25eps_internvla_l3_%j.err
 
 SCRIPT_PATH="$(realpath $0)"
 
@@ -17,6 +17,8 @@ SCRIPT_PATH="$(realpath $0)"
 export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 export PATH=$CUDA_HOME/bin:$PATH
 export WANDB_MODE=offline
+export USE_TF=0      # impedisce a transformers di tentare l'import di TF
+export USE_JAX=0
 
 source $HOME/anaconda3/etc/profile.d/conda.sh
 conda activate internvla-m1
@@ -42,8 +44,8 @@ export NCCL_TIMEOUT=1000
 CHECKPOINT_PATH="${1:-/mnt/beegfs/a.cardamone7/checkpoints/InternVLA-M1-LIBERO-Goal/checkpoints/steps_30000_pytorch_model.pt}"
 PRETRAINED_CHECKPOINT="/mnt/beegfs/a.cardamone7/checkpoints/InternVLA-M1-LIBERO-Goal/checkpoints/steps_30000_pytorch_model.pt"
 RUN_ID_NOTE="${2:-l3_spatial_finetune}"
-MAX_EPISODES_PER_TASK="${3:-10}"
-MAX_STEPS="${4:-50000}"
+MAX_EPISODES_PER_TASK="${3:-25}"
+MAX_STEPS="${4:-80000}"
 SAVE_INTERVAL="${5:-500}"
 RUN_ROOT_DIR="${6:-/mnt/beegfs/a.cardamone7/checkpoints/InternVLA_L3_Variations_finetune_libero_goal}"
 WANDB_PROJECT="${7:-InternVLA_L3_SpatialGrounding}"
@@ -53,10 +55,10 @@ QWEN_VLM_PATH="/mnt/beegfs/a.cardamone7/checkpoints/Qwen2.5-VL-3B-Instruct"
 RUN_DIR="${RUN_ROOT_DIR}/internvla_l3_eps${MAX_EPISODES_PER_TASK}_${RUN_ID_NOTE}"
 
 # --- Auto-resume: cerca l'ultimo checkpoint salvato ---
-LAST_CKPT=$(ls ${RUN_DIR}/checkpoints/steps_*_pytorch_model.pt 2>/dev/null \
-  | sort -t_ -k2 -n | tail -1)
+#LAST_CKPT=$(ls ${RUN_DIR}/checkpoints/steps_*_pytorch_model.pt 2>/dev/null \
+#  | sort -t_ -k2 -n | tail -1)
 
-#LAST_CKPT="/mnt/beegfs/a.cardamone7/checkpoints/InternVLA_L3_finetune_libero_goal/internvla_l3_eps10_l3_spatial_finetune/checkpoints/#steps_24000_pytorch_model.pt"
+LAST_CKPT="/mnt/beegfs/a.cardamone7/checkpoints/InternVLA_L3_Variations_finetune_libero_goal/internvla_l3_eps25_l3_spatial_finetune/checkpoints/steps_51000_pytorch_model.pt"
 
 if [ -n "$LAST_CKPT" ]; then
   LAST_STEP=$(echo "$LAST_CKPT" | grep -oP 'steps_\K[0-9]+')
@@ -93,7 +95,7 @@ accelerate launch \
   ${INTERNVLA_ROOT}/InternVLA/training/train_internvla.py \
   --config_yaml ${INTERNVLA_ROOT}/InternVLA/config/training/internvla_cotrain_libero_l3.yaml \
   --datasets.vla_data.per_device_batch_size 8 \
-  --framework.action_model.repeated_diffusion_steps 10 \
+  --trainer.repeated_diffusion_steps 10 \
   --trainer.gradient_accumulation_steps 4 \
   --datasets.vla_data.data_mix "libero_goal_l3_finetune" \
   --datasets.vla_data.data_root_dir "/mnt/beegfs/a.cardamone7/datasets/lerobot_libero_goal_l3" \

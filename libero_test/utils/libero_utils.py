@@ -155,9 +155,9 @@ def save_rollout_video(rollout_traj, idx, success, task_description, log_file=No
     """Saves an MP4 replay of an episode."""
     # Build directory path based on configurations
     if change_command and command_level:
-        rollout_dir = f"/home/A.CARDAMONE7/outputs/rollouts/libero_goal/syntactic_variation/InternVLA/Variations_{command_level}/run_{run}"
+        rollout_dir = f"/home/A.CARDAMONE7/outputs/rollouts/libero_goal/syntactic_variation/InternVLA/TEST_Variations_{command_level}/run_{run}"
     else:
-        rollout_dir = f"/home/A.CARDAMONE7/outputs/rollouts/libero_goal/syntactic_variation/InternVLA/Variations_{command_level}/run_{run}"
+        rollout_dir = f"/home/A.CARDAMONE7/outputs/rollouts/libero_goal/syntactic_variation/InternVLA/TEST_Variations_{command_level}/run_{run}"
 
     os.makedirs(rollout_dir, exist_ok=True)
     
@@ -165,7 +165,7 @@ def save_rollout_video(rollout_traj, idx, success, task_description, log_file=No
     mp4_path = f"{rollout_dir}/{DATE_TIME}--episode={idx}--success={success}--task={processed_task_description}.mp4"
     
     video_writer = imageio.get_writer(mp4_path, fps=30)
-    # NOTE: TinyVLA uses 'images' (plural) in rollout_traj
+
     for img in rollout_traj['images']:
         video_writer.append_data(img)
     video_writer.close()
