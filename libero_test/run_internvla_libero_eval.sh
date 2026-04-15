@@ -1,14 +1,14 @@
 #!/bin/bash
 #SBATCH --account=did_robot_learning_359
-#SBATCH --job-name=L1v_internvla_libero_eval
+#SBATCH --job-name=50_internvla_libero_eval
 #SBATCH --partition=gpuq
 #SBATCH --gres=gpu:1
 #SBATCH --ntasks=1
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
 #SBATCH --array=0-11          # 10 tasks
-#SBATCH --output=/mnt/beegfs/a.cardamone7/outputs/logs/eval_internvla_L1_Variations_10eps_50000_%a_%j.out
-#SBATCH --error=/mnt/beegfs/a.cardamone7/outputs/logs/eval_internvla_L1_Variations_10eps_50000_%a_%j.err
+#SBATCH --output=/mnt/beegfs/a.cardamone7/outputs/logs/InternVLA-M1/eval_internvla_finetuned_50eps_L3_%a_%j.out
+#SBATCH --error=/mnt/beegfs/a.cardamone7/outputs/logs/InternVLA-M1/eval_internvla_finetuned_50eps_L3_%a_%j.err
 
 # ── Array → seed/task_group mapping (same as TinyVLA script) ─────────────────
 ARRAY_ID=$SLURM_ARRAY_TASK_ID
@@ -22,10 +22,10 @@ case $TASK_GROUP in
 esac
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-CHANGE_COMMAND=true
-COMMAND_LEVEL="l1"          # l1 | l2 | l3 | all | all_no_default | default
+CHANGE_COMMAND=false                 # true | false
+COMMAND_LEVEL="default"          # l1 | l2 | l3 | all | all_no_default | default
 
-MODEL_PATH="/mnt/beegfs/a.cardamone7/checkpoints/InternVLA_L3_Variations_finetune_libero_goal/internvla_l3_eps10_l3_spatial_finetune/checkpoints/steps_50000_pytorch_model.pt"
+MODEL_PATH="/home/A.CARDAMONE7/checkpoints/InternVLA_L3_Variations_finetune_libero_goal/internvla_l3_eps50_l3_spatial_finetune/checkpoints/steps_50000_pytorch_model.pt"
 TASK_SUITE="libero_goal"
 
 WORK_DIR="/home/A.CARDAMONE7/repo/VLA-Bench/robosuite_test/InternVLA-M1/libero_test"
@@ -37,7 +37,7 @@ NUM_TRIALS_PER_TASK=50
 NUM_STEPS_WAIT=10
 ENV_IMG_RES=256
 
-ID_NOTE="Original_${COMMAND_LEVEL}_Variations_10eps_finetuned_50000steps_seed${SEED}_${TASK_RANGE}"
+ID_NOTE="L3_Finetuned_Checkpoint_50eps_${COMMAND_LEVEL}_seed${SEED}_${TASK_RANGE}"
 
 # ── Environment ───────────────────────────────────────────────────────────────
 export MUJOCO_PY_MUJOCO_PATH=$HOME/.mujoco/mujoco210

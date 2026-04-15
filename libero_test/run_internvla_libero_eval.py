@@ -609,6 +609,14 @@ def run_task(cfg, task_suite, task_id, policy, log_file,
             ablation_bddl_file=ablation_bddl_file,
             resolution=cfg.env_img_res,
         )
+        if task_canonical_description is None:
+            # Keep a stable, printable task label across command versions.
+            task_canonical_description = (
+                original_description
+                or task_description
+                or getattr(task, "name", None)
+                or f"task_{task_id + 1}"
+            )
         log_message("=" * 80, log_file)
         log_message(f"Testing VERSION: {version_label}", log_file)
         log_message(f"Original Command:  {original_description}", log_file)
@@ -819,8 +827,11 @@ def run_libero_eval(cfg: GenerateConfig):
         for l, res in task_results.items():
             sr  = res.get(t, {}).get("success_rate", 0.0)
             eps = res.get(t, {}).get("episodes", 0)
+            sr = float(sr) if sr is not None else 0.0
+            eps = int(eps) if eps is not None else 0
             succ = int(round(sr * eps))
-            print(f"{t:<50} | {sr:>11.1%} | {succ:>6}/{eps:<8}")
+            task_label = str(t) if t is not None else "unknown_task"
+            print(f"{task_label:<50} | {sr:>11.1%} | {succ:>6}/{eps:<8}")
 
     print("-" * 100)
 

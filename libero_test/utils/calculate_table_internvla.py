@@ -92,13 +92,36 @@ def parse_eval_log(filepath: str, num_trials: int = 50) -> list:
     """
     Parsa un file sintattica.
 
-    Righe chiave:
-      TASK X/10                    ← blocco task (senza "Task Composition")
-      Original:  <testo>
-      Variation [L3]: <testo>      ← assente per DEFAULT
-      Task SR: 0.8800              ← DECIMALE (0.0–1.0) → moltiplichiamo ×100
+    Righe chiave (supporta vecchio + nuovo formato):
+      TASK X/10
+      Original: <testo>                    oppure Original Command: <testo>
+      Variation [L3]: <testo>              oppure Variation Command: <testo>
+      Task SR: 0.8800                       (decimale 0.0–1.0)
+
+    Se "Task SR" non e presente, la funzione ricava SR da:
+      [default] ep N | success=True/False | ...
     """
     tasks, current = [], {}
+
+    def _finalize_current(task_obj):
+        if not task_obj:
+            return None
+
+        # Fallback: calcolo da episodi se Task SR non compare nel log.
+        if "task_sr" not in task_obj:
+            ep = int(task_obj.get("episodes", 0))
+            succ = int(task_obj.get("successes", 0))
+            if ep > 0:
+                task_obj["task_sr"] = (succ / ep) * 100.0
+            else:
+                return None
+
+        # Garantisce consistenza minima per le colonne Comp.
+        if "episodes" not in task_obj:
+            task_obj["episodes"] = num_trials
+        if "successes" not in task_obj:
+            task_obj["successes"] = int(round((task_obj["task_sr"] / 100.0) * task_obj["episodes"]))
+        return task_obj
 
     with open(filepath, "r", errors="replace") as f:
         lines = [l.rstrip("\r\n") for l in f]
@@ -107,13 +130,17 @@ def parse_eval_log(filepath: str, num_trials: int = 50) -> list:
         # Blocco task sintattica: "TASK X/10" senza "(Task Composition"
         m = re.match(r"^TASK\s+(\d+)/\d+\s*$", line)
         if m:
-            if current and "task_sr" in current:
-                tasks.append(current)
+            prev = _finalize_current(current)
+            if prev is not None:
+                tasks.append(prev)
             current = {"task_id": int(m.group(1))}
             continue
 
-        if line.startswith("Original:") and current is not None:
-            current["original"] = line.split("Original:", 1)[1].strip()
+        if (line.startswith("Original:") or line.startswith("Original Command:")) and current is not None:
+            if line.startswith("Original Command:"):
+                current["original"] = line.split("Original Command:", 1)[1].strip()
+            else:
+                current["original"] = line.split("Original:", 1)[1].strip()
             continue
 
         m2 = re.match(r"^Variation \[(\w+)\]:\s*(.+)", line)
@@ -122,16 +149,33 @@ def parse_eval_log(filepath: str, num_trials: int = 50) -> list:
             current["variation"]       = m2.group(2).strip()
             continue
 
+        if line.startswith("Variation Command:") and current is not None:
+            current["variation"] = line.split("Variation Command:", 1)[1].strip()
+            continue
+
+        m_ep = re.search(r"\|\s*success=(True|False)\s*\|", line)
+        if m_ep and current is not None:
+            current["episodes"] = int(current.get("episodes", 0)) + 1
+            if m_ep.group(1) == "True":
+                current["successes"] = int(current.get("successes", 0)) + 1
+            else:
+                current["successes"] = int(current.get("successes", 0))
+            continue
+
         # "Task SR: 0.8800"  (decimale, nessuna parentesi)
         m3 = re.match(r"^Task SR:\s*([0-9.]+)\s*$", line)
         if m3 and current:
             sr_decimal          = float(m3.group(1))          # es. 0.8800
             current["task_sr"]  = sr_decimal * 100            # → 88.0  (percentuale)
-            current["episodes"] = num_trials
-            current["successes"] = int(round(sr_decimal * num_trials))  # 44
+            episodes = int(current.get("episodes", 0))
+            if episodes <= 0:
+                episodes = num_trials
+            current["episodes"] = episodes
+            current["successes"] = int(round(sr_decimal * episodes))
 
-    if current and "task_sr" in current:
-        tasks.append(current)
+    last = _finalize_current(current)
+    if last is not None:
+        tasks.append(last)
 
     tasks.sort(key=lambda t: t.get("task_id", 0))
     return tasks
@@ -198,7 +242,7 @@ def write_excel_syntactic(output_xlsx, txt_files_by_seed,
         "SR% — Seed 0", "Comp. Seed 0",
         "SR% — Seed 1", "Comp. Seed 1",
         "SR% — Seed 2", "Comp. Seed 2",
-        "Mean SR% ± Std%", "Mean Comp.",
+        "Mean SR% ± Std%", "Mean Comp.", "Baseline Mean SR% ± Std%",
     ]
     ws.append(headers)
     for cell in ws[1]:
@@ -207,6 +251,7 @@ def write_excel_syntactic(output_xlsx, txt_files_by_seed,
 
     all_seed_rates = [[], [], []]
     all_seed_comps = [[], [], []]
+    all_task_means = []  # Raccoglie i mean_r di ogni task per calcolare la baseline
 
     for task_num, orig_task in enumerate(fixed_order, start=1):
         log_key   = orig_to_log_key.get(orig_task, orig_task.lower())
@@ -241,6 +286,49 @@ def write_excel_syntactic(output_xlsx, txt_files_by_seed,
             std_r  = math.sqrt(sum((r - mean_r)**2 for r in valid) / max(len(valid)-1, 1))
             mean_display = f"{mean_r:.1f}% ± {std_r:.1f}%"
             avg_succ     = int(round(mean_r / 100 * num_trials))
+            all_task_means.append(mean_r)
+        else:
+            mean_display, avg_succ = "N/A", 0
+
+    # Calcola la baseline: media e std di tutti i task mean
+    if all_task_means:
+        baseline_mean = sum(all_task_means) / len(all_task_means)
+        baseline_std = math.sqrt(sum((m - baseline_mean)**2 for m in all_task_means) / max(len(all_task_means)-1, 1))
+        baseline_display = f"{baseline_mean:.1f}% ± {baseline_std:.1f}%"
+    else:
+        baseline_display = "N/A"
+
+    # Ora aggiungi tutte le righe con la baseline
+    for task_num, orig_task in enumerate(fixed_order, start=1):
+        log_key   = orig_to_log_key.get(orig_task, orig_task.lower())
+        variation = None
+        seed_rates, seed_comps = [], []
+
+        for seed_idx, (merged_rates, task_eps, _, task_orig, task_var) in enumerate(all_merged):
+            rate = merged_rates.get(log_key, float("nan"))   # già in %
+            ep   = task_eps.get(log_key, num_trials)
+
+            if not math.isnan(rate):
+                succ = int(round(rate / 100 * ep))           # % → decimale → successi
+            else:
+                succ = 0
+
+            if variation is None and log_key in task_var:
+                v = task_var[log_key]
+                if v.lower() != orig_task.lower():
+                    variation = v
+
+            seed_rates.append(rate)
+            seed_comps.append(f"{succ}/{ep}")
+
+        var_display = variation if variation else orig_task
+
+        valid = [r for r in seed_rates if not math.isnan(r)]
+        if valid:
+            mean_r = sum(valid) / len(valid)
+            std_r  = math.sqrt(sum((r - mean_r)**2 for r in valid) / max(len(valid)-1, 1))
+            mean_display = f"{mean_r:.1f}% ± {std_r:.1f}%"
+            avg_succ     = int(round(mean_r / 100 * num_trials))
         else:
             mean_display, avg_succ = "N/A", 0
 
@@ -254,6 +342,7 @@ def write_excel_syntactic(output_xlsx, txt_files_by_seed,
             seed_comps[2],
             mean_display,
             f"{avg_succ}/{num_trials}",
+            baseline_display,
         ])
 
     # ── Riga finale ──
@@ -279,6 +368,8 @@ def write_excel_syntactic(output_xlsx, txt_files_by_seed,
         final_row.extend([f"{gm:.2f}% ± {gs:.2f}%", f"{gt_s}/{gt_e}"])
     else:
         final_row.extend(["N/A", "0/0"])
+
+    final_row.append(baseline_display)
 
     ws.append(final_row)
     for cell in ws[ws.max_row]:

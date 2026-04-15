@@ -6,22 +6,20 @@
 #SBATCH --ntasks=1
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
-#SBATCH --array=2
+#SBATCH --array=0-14          # 9 tasks (3 task groups × 3 seeds)
 #SBATCH --output=/mnt/beegfs/a.cardamone7/outputs/logs/eval_internvla_taskcomp_%a_%j.out
 #SBATCH --error=/mnt/beegfs/a.cardamone7/outputs/logs/eval_internvla_taskcomp_%a_%j.err
 
 
 # ── Array → seed/task_group mapping ──────────────────────────────────────────
 # 5 task comp tasks split in 3 groups × 3 seeds = 9 array jobs (0-8)
+N_TASKS=5
 ARRAY_ID=$SLURM_ARRAY_TASK_ID
-SEED=$((ARRAY_ID / 3))
-TASK_GROUP=$((ARRAY_ID % 3))
+SEED=$((ARRAY_ID / N_TASKS))
+TASK_IDX=$((ARRAY_ID % N_TASKS))
 
-case $TASK_GROUP in
-  0) TASK_START=0; TASK_END=1 ;;
-  1) TASK_START=2; TASK_END=3 ;;
-  2) TASK_START=4; TASK_END=4 ;;
-esac
+TASK_START=$TASK_IDX
+TASK_END=$((TASK_IDX + 1))
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────

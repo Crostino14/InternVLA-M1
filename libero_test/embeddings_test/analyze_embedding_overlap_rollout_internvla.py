@@ -269,7 +269,7 @@ def _save_formatted_overlap_table(level_df: pd.DataFrame, level: str, output_pat
     avg_font = Font(bold=True)
 
     def fmt(col):
-        return f"{level_df[col].mean():.4f} +/- {level_df[col].std():.4f}"
+        return f"{level_df[col].mean():.4f} ± {level_df[col].std():.4f}"
 
     avg_values = [
         "AVERAGE",

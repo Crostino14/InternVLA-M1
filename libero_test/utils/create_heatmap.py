@@ -281,7 +281,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--test_path",
         type=str,
-        default="/home/A.CARDAMONE7/outputs/rollouts/libero_goal/syntactic_variation/InternVLA/traj_original_l3",
+        default="/mnt/beegfs/a.cardamone7/outputs/rollouts/libero_goal/task_composition/internvla_m1",
         help="Path to rollout folder (direct run_* or parent folder with multiple configs)",
     )
     parser.add_argument(

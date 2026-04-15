@@ -21,8 +21,7 @@ from openpyxl.utils import get_column_letter
 # Configuration
 # ──────────────────────────────────────────────────────────────────────────────
 DEFAULT_BASE_DIR = (
-    "/mnt/beegfs/a.cardamone7/outputs/results/libero_goal/"
-    "syntactic_command_variation/internvla-m1"
+    "/home/A.CARDAMONE7/outputs/results/libero_goal/syntactic_command_variation/internvla-m1_l3_finetuned"
 )
 
 VARIANTS = {
@@ -31,7 +30,7 @@ VARIANTS = {
     "50eps": "50eps_50k_steps",
 }
 
-LEVELS = ["l1", "l2", "l3"]
+LEVELS = ["l1", "l2", "l3", "default"]
 
 TASK_SR_PATTERN = re.compile(r"Task SR:\s*([0-9.]+)")
 FILENAME_PATTERN = re.compile(r".*seed(\d+)_task(\d+)-l\d+\.txt$", re.IGNORECASE)
@@ -102,6 +101,20 @@ def collect_sr_values(level_dir):
 def build_excel(results, output_path):
     wb = Workbook()
 
+    # Calcola baseline globale: media di tutte le medie SR
+    all_means = []
+    for variant in results.values():
+        for mean_sr, std_sr, n in variant.values():
+            if not np.isnan(mean_sr):
+                all_means.append(mean_sr)
+    
+    if all_means:
+        baseline_mean = np.mean(all_means)
+        baseline_std = np.std(all_means, ddof=1) if len(all_means) > 1 else 0.0
+        baseline_display = f"{baseline_mean:.2f}% ± {baseline_std:.2f}%"
+    else:
+        baseline_display = "N/A"
+
     # ── Sheet 1: Summary table ──────────────────────────────────────────────
     ws = wb.active
     ws.title = "Results"
@@ -111,10 +124,11 @@ def build_excel(results, output_path):
     ws.column_dimensions["C"].width = 20
     ws.column_dimensions["D"].width = 20
     ws.column_dimensions["E"].width = 20
+    ws.column_dimensions["F"].width = 20
     ws.row_dimensions[1].height = 8
 
     # Title row (row 2)
-    ws.merge_cells("B2:E2")
+    ws.merge_cells("B2:F2")
     t = ws["B2"]
     t.value     = "L3 Syntactic Generalisation — Fine-Tuning Results"
     t.font      = TITLE_FONT
@@ -123,7 +137,7 @@ def build_excel(results, output_path):
     ws.row_dimensions[2].height = 30
 
     # Header row (row 3)
-    headers = ["Fine-tuned Model", "L1  Mean SR% ± Std%", "L2  Mean SR% ± Std%", "L3  Mean SR% ± Std%"]
+    headers = ["Fine-tuned Model", "L1  Mean SR% ± Std%", "L2  Mean SR% ± Std%", "L3  Mean SR% ± Std%", "Baseline Mean SR% ± Std%"]
     for col, h in enumerate(headers, start=2):
         c = ws.cell(row=3, column=col, value=h)
         c.font      = HDR_FONT
@@ -166,6 +180,14 @@ def build_excel(results, output_path):
                 c.font      = DATA_FONT
                 c.alignment = CENTER
 
+        # Aggiungi colonna baseline
+        c_baseline = ws.cell(row=row, column=6)
+        c_baseline.fill   = fill
+        c_baseline.border = inner_border()
+        c_baseline.value     = baseline_display
+        c_baseline.font      = DATA_FONT
+        c_baseline.alignment = CENTER
+
     # ── Sheet 2: Raw data per (variant, level) ─────────────────────────────
     ws2 = wb.create_sheet("Raw Data")
     ws2.column_dimensions["A"].width = 3
@@ -174,9 +196,10 @@ def build_excel(results, output_path):
     ws2.column_dimensions["D"].width = 14
     ws2.column_dimensions["E"].width = 14
     ws2.column_dimensions["F"].width = 14
+    ws2.column_dimensions["G"].width = 18
 
     ws2.row_dimensions[1].height = 8
-    ws2.merge_cells("B2:F2")
+    ws2.merge_cells("B2:G2")
     t2 = ws2["B2"]
     t2.value     = "Raw Statistics per Variant × Level"
     t2.font      = TITLE_FONT
@@ -184,7 +207,7 @@ def build_excel(results, output_path):
     t2.alignment = CENTER
     ws2.row_dimensions[2].height = 28
 
-    raw_headers = ["Variant", "Level", "N files", "Mean SR (%)", "Std SR (%)"]
+    raw_headers = ["Variant", "Level", "N files", "Mean SR (%)", "Std SR (%)", "Baseline Mean SR% ± Std%"]
     for col, h in enumerate(raw_headers, start=2):
         c = ws2.cell(row=3, column=col, value=h)
         c.font      = HDR_FONT
@@ -203,6 +226,7 @@ def build_excel(results, output_path):
                 label, level.upper(), n,
                 round(mean_sr, 4) if not np.isnan(mean_sr) else "N/A",
                 round(std_sr,  4) if not np.isnan(std_sr)  else "N/A",
+                baseline_display,
             ]
             for col, val in enumerate(row_vals, start=2):
                 c = ws2.cell(row=raw_row, column=col, value=val)
