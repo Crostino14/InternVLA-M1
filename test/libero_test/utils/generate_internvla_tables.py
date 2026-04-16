@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-Generate TinyVLA evaluation tables in the format specified.
-Reads log files and creates per-task variation tables with Original, V1, V2, V3.
+Generate InternVLA-M1 syntactic variation tables from evaluation logs.
+
+This script groups logs by task and variation, computes mean and standard
+deviation across seeds, and writes Excel tables for L1 or L2 evaluation levels.
 """
 
 import re
@@ -298,7 +300,14 @@ TASK_DESCRIPTIONS = {
 
 
 def extract_task_index_from_filename(filepath):
-    """Extract task index (0-based) from filename."""
+    """Extract zero-based task index from a log filename.
+
+    Args:
+        filepath (str): Path to one log file.
+
+    Returns:
+        int | None: Parsed task index, or `None` when the pattern is missing.
+    """
     filename = Path(filepath).name
     match = re.search(r'_task(\d+)_seed', filename)
     if match:
@@ -307,13 +316,27 @@ def extract_task_index_from_filename(filepath):
 
 
 def is_single_task_file(filepath):
-    """Check if file is a single-task file."""
+    """Check whether a log filename targets a single task.
+
+    Args:
+        filepath (str): Path to one log file.
+
+    Returns:
+        bool: True when the filename follows single-task naming.
+    """
     filename = Path(filepath).name
     return "task" in filename and "_seed" in filename and filename.count("task") >= 2
 
 
 def parse_txt_evaluation(filepath):
-    """Parse evaluation txt file and extract variation results."""
+    """Parse one evaluation log and extract variation-level task success rates.
+
+    Args:
+        filepath (str): Path to one evaluation log file.
+
+    Returns:
+        dict[str, dict]: Command text to parsed rate metadata.
+    """
     results = {}
     task_index_offset = None
     
@@ -365,7 +388,15 @@ def parse_txt_evaluation(filepath):
 
 
 def classify_variation(task_text, task_offset=None):
-    """Classify task text to (task_num, variant_type)."""
+    """Map command text to task id and variation label.
+
+    Args:
+        task_text (str): Command text from the log.
+        task_offset (int | None): Optional task index inferred from filename.
+
+    Returns:
+        tuple[int | None, str | None]: `(task_num, variant_type)` pair.
+    """
     task_num = None
     
     if task_offset is not None:
@@ -385,7 +416,14 @@ def classify_variation(task_text, task_offset=None):
 
 
 def compute_stats(rates):
-    """Compute mean and std from list of rates."""
+    """Compute sample mean and standard deviation for rate values.
+
+    Args:
+        rates (list[float]): Task success rate values in percentage.
+
+    Returns:
+        tuple[float, float]: `(mean, std)` in percentage points.
+    """
     if not rates:
         return 0.0, 0.0
     
@@ -401,7 +439,15 @@ def compute_stats(rates):
 
 
 def format_value(mean, std):
-    """Format mean and std with comma as decimal separator."""
+    """Format one mean ± std value using percentage style.
+
+    Args:
+        mean (float): Mean task success rate.
+        std (float): Standard deviation.
+
+    Returns:
+        str: Formatted value, or `N/A` when both inputs are zero.
+    """
     if mean == 0 and std == 0:
         return "N/A"
     formatted = f"{mean:.1f}% ± {std:.1f}%"
@@ -409,7 +455,15 @@ def format_value(mean, std):
 
 
 def aggregate_results(file_list, level="L1"):
-    """Aggregate results across all files."""
+    """Aggregate parsed log results across files and seeds.
+
+    Args:
+        file_list (list[str]): Input log files.
+        level (str): Level label kept for compatibility with caller options.
+
+    Returns:
+        dict: Nested task/variant/seed structure with task success rate values.
+    """
     # Structure: {task: {variant: {seed: rate}}}
     aggregated = {}
     
@@ -440,7 +494,17 @@ def aggregate_results(file_list, level="L1"):
 
 
 def create_task_table(task_num, aggregated_data, level="L1", model_name="InternVLA-M1"):
-    """Create a table for a single task with all variations."""
+    """Create one Excel workbook for a single task table.
+
+    Args:
+        task_num (int): Task id in `[1, 10]`.
+        aggregated_data (dict): Aggregated output from `aggregate_results`.
+        level (str): Syntactic level label (`L1` or `L2`).
+        model_name (str): Model label printed in the table.
+
+    Returns:
+        openpyxl.Workbook: Workbook containing one task sheet.
+    """
     wb = Workbook()
     ws = wb.active
     
@@ -516,7 +580,16 @@ def create_task_table(task_num, aggregated_data, level="L1", model_name="InternV
 
 
 def create_summary_table(aggregated_data, level="L1", model_name="InternVLA-M1"):
-    """Create a summary table with all tasks and variations."""
+    """Create one summary workbook with all tasks in one sheet.
+
+    Args:
+        aggregated_data (dict): Aggregated output from `aggregate_results`.
+        level (str): Syntactic level label (`L1` or `L2`).
+        model_name (str): Model label printed in the table title.
+
+    Returns:
+        openpyxl.Workbook: Workbook with one summary sheet.
+    """
     wb = Workbook()
     ws = wb.active
     ws.title = "Summary"
@@ -578,6 +651,11 @@ def create_summary_table(aggregated_data, level="L1", model_name="InternVLA-M1")
 
 
 def main():
+    """Parse CLI arguments and generate task or summary Excel tables.
+
+    Returns:
+        None: Writes output files and prints progress.
+    """
     parser = argparse.ArgumentParser(description="Generate InternVLA evaluation tables")
     parser.add_argument("--files", nargs="+", required=True, help="Log files to process")
     parser.add_argument("--level", default="L1", choices=["L1", "L2"], help="Evaluation level")

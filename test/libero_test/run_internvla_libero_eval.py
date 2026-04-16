@@ -1,3 +1,14 @@
+"""Run InternVLA-M1 rollouts on LIBERO-Goal and report task success rate.
+
+This script is the evaluation entry point for the InternVLA-M1 branch of the
+thesis pipeline. It loads one checkpoint, runs closed-loop rollouts on LIBERO
+tasks (including optional BDDL task variants for syntactic levels), and logs
+task success rate per task and per variant. The code assumes the checkpoint was
+already fine-tuned on the nonoops variant and only handles evaluation, not
+training. It is used for syntactic generalization studies (L1/L2/L3) and for
+baseline runs on the same task suite.
+"""
+
 import sys
 import os
 import logging
@@ -50,6 +61,16 @@ logger = logging.getLogger(__name__)
 
 
 class TaskSuite(str, Enum):
+    """Names of LIBERO benchmark suites accepted by this evaluator.
+
+    Attributes:
+        LIBERO_SPATIAL (str): Spatial subset in LIBERO.
+        LIBERO_OBJECT (str): Object-focused subset in LIBERO.
+        LIBERO_GOAL (str): LIBERO-Goal suite used in the thesis experiments.
+        LIBERO_10 (str): Ten-task subset from LIBERO.
+        LIBERO_90 (str): Ninety-task subset from LIBERO.
+    """
+
     LIBERO_SPATIAL = "libero_spatial"
     LIBERO_OBJECT  = "libero_object"
     LIBERO_GOAL    = "libero_goal"
@@ -71,175 +92,59 @@ SPATIAL_COT_PROMPT = (
 )
 
 def log_message(message: str, log_file=None):
+    """Write one log line to console and to the optional run log.
+
+    Args:
+        message (str): Text to write.
+        log_file (Optional[IO[str]]): File handle opened in write/append mode.
+
+    Returns:
+        None: This function only writes side effects.
+
+    Raises:
+        OSError: If file writing fails.
+    """
     logger.info(message)
     if log_file:
         log_file.write(message + "\n")
         log_file.flush()
 
-
-def _to_jsonable(obj):
-    """Recursively convert objects to JSON-serializable types."""
-    if isinstance(obj, np.ndarray):
-        return obj.tolist()
-    if isinstance(obj, (np.floating, np.integer)):
-        return obj.item()
-    if isinstance(obj, (list, tuple)):
-        return [_to_jsonable(x) for x in obj]
-    if isinstance(obj, dict):
-        return {str(k): _to_jsonable(v) for k, v in obj.items()}
-    if isinstance(obj, Image.Image):
-        return f"<PIL.Image mode={obj.mode} size={obj.size}>"
-    try:
-        json.dumps(obj)
-        return obj
-    except Exception:
-        return str(obj)
-
-
-def _extract_bbox_like_fields(pred_dict: dict) -> dict:
-    """
-    Best-effort extraction of grounding outputs from model predictions.
-    Keeps only keys that look like bbox/grounding fields.
-    """
-    bbox_like = {}
-    if not isinstance(pred_dict, dict):
-        return bbox_like
-
-    candidate_tokens = ("bbox", "box", "region", "ground", "loc")
-    for key, value in pred_dict.items():
-        k = str(key).lower()
-        if any(tok in k for tok in candidate_tokens):
-            bbox_like[str(key)] = _to_jsonable(value)
-    return bbox_like
-
-
-def _iter_bbox_arrays(obj, prefix=""):
-    """Yield (path, np.ndarray) for entries that look like bbox tensors [..., 4]."""
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            next_prefix = f"{prefix}.{k}" if prefix else str(k)
-            yield from _iter_bbox_arrays(v, next_prefix)
-        return
-
-    if isinstance(obj, (list, tuple)):
-        try:
-            arr = np.asarray(obj)
-            if arr.ndim >= 1 and arr.shape[-1] == 4 and np.issubdtype(arr.dtype, np.number):
-                yield (prefix or "boxes", arr.astype(np.float32))
-                return
-        except Exception:
-            pass
-        for i, v in enumerate(obj):
-            next_prefix = f"{prefix}[{i}]" if prefix else f"[{i}]"
-            yield from _iter_bbox_arrays(v, next_prefix)
-        return
-
-    if isinstance(obj, np.ndarray):
-        if obj.ndim >= 1 and obj.shape[-1] == 4 and np.issubdtype(obj.dtype, np.number):
-            yield (prefix or "boxes", obj.astype(np.float32))
-
-
-def _to_pixel_xyxy(box_xyxy, width: int, height: int, model_img_size: int = 224):
-    """Convert bbox [x1,y1,x2,y2] to pixel coordinates using simple scale heuristics."""
-    b = np.asarray(box_xyxy, dtype=np.float32).reshape(-1)
-    if b.size != 4:
-        return None
-
-    x1, y1, x2, y2 = b.tolist()
-    vals = np.array([x1, y1, x2, y2], dtype=np.float32)
-
-    if np.all(np.isfinite(vals)):
-        if np.max(np.abs(vals)) <= 1.05:
-            x1, y1, x2, y2 = x1 * width, y1 * height, x2 * width, y2 * height
-        elif np.max(np.abs(vals)) <= float(model_img_size) * 1.2:
-            sx = width / float(model_img_size)
-            sy = height / float(model_img_size)
-            x1, y1, x2, y2 = x1 * sx, y1 * sy, x2 * sx, y2 * sy
-
-    x1, x2 = sorted([int(round(x1)), int(round(x2))])
-    y1, y2 = sorted([int(round(y1)), int(round(y2))])
-
-    x1 = max(0, min(width - 1, x1))
-    x2 = max(0, min(width - 1, x2))
-    y1 = max(0, min(height - 1, y1))
-    y2 = max(0, min(height - 1, y2))
-
-    if x2 <= x1 or y2 <= y1:
-        return None
-    return (x1, y1, x2, y2)
-
-
-def _draw_bboxes_on_image(image: np.ndarray, bbox_entries):
-    """Draw bbox entries on a copy of image. bbox_entries is list[(label, xyxy)]."""
-    out = image.copy()
-    h, w = out.shape[:2]
-    color = (0, 255, 0)
-    text_color = (255, 255, 255)
-
-    drawn = 0
-    for label, box in bbox_entries:
-        pix = _to_pixel_xyxy(box, w, h)
-        if pix is None:
-            continue
-        x1, y1, x2, y2 = pix
-        cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
-        cv2.putText(
-            out,
-            label,
-            (x1, max(12, y1 - 4)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.4,
-            text_color,
-            1,
-            cv2.LINE_AA,
-        )
-        drawn += 1
-    return out, drawn
-
-
-def save_vlm_bbox_frame(frame_dir: str, timestep: int, agentview: np.ndarray,
-                        wrist: np.ndarray, pred_meta: dict) -> int:
-    """Save side-by-side frame with bbox overlays. Returns number of drawn boxes."""
-    bbox_dict = pred_meta.get("bbox_like", {}) if isinstance(pred_meta, dict) else {}
-
-    bbox_entries = []
-    if bbox_dict:
-        for path, arr in _iter_bbox_arrays(bbox_dict):
-            flat = np.asarray(arr, dtype=np.float32).reshape(-1, 4)
-            for i, row in enumerate(flat):
-                bbox_entries.append((f"{path}[{i}]", row))
-
-    agent_annot, n_agent = _draw_bboxes_on_image(agentview, bbox_entries)
-    wrist_annot, n_wrist = _draw_bboxes_on_image(wrist, bbox_entries)
-
-    header_h = 28
-    canvas_h = max(agent_annot.shape[0], wrist_annot.shape[0]) + header_h
-    canvas_w = agent_annot.shape[1] + wrist_annot.shape[1]
-    canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
-
-    canvas[header_h:header_h + agent_annot.shape[0], :agent_annot.shape[1]] = agent_annot
-    canvas[header_h:header_h + wrist_annot.shape[0], agent_annot.shape[1]:] = wrist_annot
-
-    title = f"t={timestep} | boxes={min(n_agent, n_wrist)}"
-    cv2.putText(canvas, title, (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
-    cv2.line(canvas, (agent_annot.shape[1], header_h), (agent_annot.shape[1], canvas_h - 1), (100, 100, 100), 1)
-
-    os.makedirs(frame_dir, exist_ok=True)
-    out_path = os.path.join(frame_dir, f"frame_t{timestep:04d}.png")
-    ok = cv2.imwrite(out_path, cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR))
-    if not ok:
-        raise RuntimeError(f"cv2.imwrite failed for path: {out_path}")
-    return min(n_agent, n_wrist)
-
-
-
 # ─── InternVLA-M1 policy wrapper ─────────────────────────────────────────────
 
 
 class InternVLA_M1_policy:
-    """Policy wrapper for InternVLA-M1."""
+    """Inference wrapper for InternVLA-M1 in LIBERO rollout evaluation.
+
+    The class keeps the loaded model, action unnormalization stats, and action
+    chunk size. `predict()` returns one action chunk conditioned on two camera
+    views and one instruction.
+
+    Attributes:
+        model (InternVLA_M1): Model in eval mode on the selected device.
+        device (str): Inference device, usually `"cuda"`.
+        use_cot (bool): If true, prepends a spatial prompt to instructions.
+        action_mask (np.ndarray): Boolean mask for unnormalization dimensions.
+        action_high (np.ndarray): Per-dimension max values for action scaling.
+        action_low (np.ndarray): Per-dimension min values for action scaling.
+        chunk_size (int): Number of actions per action chunk.
+    """
 
     def __init__(self, model_path: str, device: str = "cuda", use_cot: bool = True):
+        """Load checkpoint and metadata needed for rollout-time inference.
+
+        Args:
+            model_path (str): Path to an InternVLA-M1 checkpoint (`.pt` file).
+            device (str): Torch device string, e.g. `"cuda"` or `"cpu"`.
+            use_cot (bool): Enables the spatial CoT prompt template.
+
+        Returns:
+            None: The constructor initializes instance attributes in place.
+
+        Raises:
+            FileNotFoundError: If checkpoint or inferred config file is missing.
+            RuntimeError: If the checkpoint cannot be loaded into the model.
+            KeyError: If normalization stats are missing expected keys.
+        """
         from InternVLA.model.framework.share_tools import read_mode_config
         from omegaconf import OmegaConf
 
@@ -272,13 +177,13 @@ class InternVLA_M1_policy:
                         f"Available: {list(norm_stats.keys())}. Using '{fallback}' as fallback.")
             EMBODIMENT_KEY = fallback
 
-        # Unnormalization stats
+        # Stats used to map normalized outputs to end-effector delta (R^7).
         action_stats      = norm_stats[EMBODIMENT_KEY]["action"]
         self.action_mask  = np.array(action_stats["mask"], dtype=bool)
         self.action_high  = np.array(action_stats["max"],  dtype=np.float32)
         self.action_low   = np.array(action_stats["min"],  dtype=np.float32)
 
-        # Chunk size da config
+        # Action chunk length from training configuration.
         self.chunk_size = (
             model_config["framework"]["action_model"]["future_action_window_size"] + 1
         )
@@ -286,6 +191,31 @@ class InternVLA_M1_policy:
 
     def predict(self, agentview_img, wrist_img, instruction,
                 cfg_scale=1.5, num_ddim_steps=10, return_metadata: bool = False):
+        """Predict one action chunk for the current rollout step.
+
+        Args:
+            agentview_img (np.ndarray): Agent-view RGB frame, shape
+                ``[H, W, 3]``, dtype ``np.uint8``.
+            wrist_img (np.ndarray): Wrist-view RGB frame, shape
+                ``[H, W, 3]``, dtype ``np.uint8``.
+            instruction (str): Language instruction for the current task.
+            cfg_scale (float): Guidance scale for diffusion sampling.
+            num_ddim_steps (int): Number of DDIM denoising steps.
+            return_metadata (bool): If true, also returns model-output metadata.
+
+        Returns:
+            np.ndarray | tuple[np.ndarray, dict]: Action chunk with shape
+            ``[T, 7]`` and dtype ``np.float32``. If `return_metadata` is true,
+            returns ``(actions, metadata)``.
+
+        Raises:
+            RuntimeError: If model inference fails.
+            KeyError: If expected output keys are missing.
+
+        Example:
+            >>> chunk = policy.predict(agent_img, wrist_img, "Turn on the stove")
+            >>> print(chunk.shape)  # [T, 7]
+        """
         
         if self.use_cot:
             instruction = SPATIAL_COT_PROMPT.replace("{instruction}", instruction)
@@ -301,13 +231,13 @@ class InternVLA_M1_policy:
         #]}]
         #dummy_text   = proc.apply_chat_template(dummy_msg, tokenize=False, add_generation_prompt=True)
         #n_img_tokens = dummy_text.count("<|image_pad|>")
-        #print(f"[DEBUG] image_tokens={n_img_tokens} (attesi: ≥2) | '{instruction}'", flush=True)
+        #print(f"[DEBUG] image_tokens={n_img_tokens} (expected: >=2) | '{instruction}'", flush=True)
 
         view1 = Image.fromarray(agentview_img)
         view2 = Image.fromarray(wrist_img)
         with torch.inference_mode():
             pred = self.model.predict_action(
-                batch_images=[[view1, view2]],      # due viste come nel training
+                batch_images=[[view1, view2]],
                 instructions=[instruction],
                 cfg_scale=cfg_scale,
                 use_ddim=True,
@@ -321,10 +251,10 @@ class InternVLA_M1_policy:
         
         #img_hash = int(np.sum(agentview_img.astype(np.int64)) % 1e9)
 
-        # Gripper (dim 6): threshold sul normalized raw — come nel codice ufficiale
+        # Keep binary gripper command before environment conversion.
         normalized[:, 6] = np.where(normalized[:, 6] < 0.5, 0.0, 1.0)
 
-        # Unnormalizzazione min/max — identica a M1Inference.unnormalize_actions
+        # Recover physical action scale from normalized range [-1, 1].
         actions = np.where(
             self.action_mask,
             0.5 * (normalized + 1) * (self.action_high - self.action_low) + self.action_low,
@@ -336,7 +266,6 @@ class InternVLA_M1_policy:
 
         metadata = {
             "pred_keys": list(pred.keys()) if isinstance(pred, dict) else [],
-            "bbox_like": _extract_bbox_like_fields(pred),
         }
         return actions, metadata
 
@@ -346,10 +275,22 @@ class InternVLA_M1_policy:
 
 
 def get_obs_internvla(obs):
-    """
-    Ritorna (agentview, wrist) come uint8 RGB array a 224x224.
-    Il doppio flip [::-1, ::-1] è confermato dal codice ufficiale InternVLA-M1
-    per allineare l'orientamento OpenGL con il preprocessing del training.
+    """Convert environment observations into InternVLA-M1 image inputs.
+
+    Args:
+        obs (dict): Observation dict from LIBERO/robosuite.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: Agent and wrist RGB frames resized to
+        ``[224, 224, 3]``, dtype ``np.uint8``.
+
+    Raises:
+        KeyError: If required camera keys are missing in `obs`.
+        cv2.error: If image resize fails.
+
+    Note:
+        A double flip is applied to match orientation used in InternVLA-M1
+        preprocessing.
     """
     agentview = np.ascontiguousarray(obs['agentview_image'][::-1, ::-1])
     wrist      = np.ascontiguousarray(obs['robot0_eye_in_hand_image'][::-1, ::-1])
@@ -359,17 +300,32 @@ def get_obs_internvla(obs):
 
 
 def binarize_gripper_for_robosuite(gripper_val: float) -> float:
-    """
-    Converte il gripper unnormalizzato {0.0, 1.0} in delta_qpos robosuite:
-      0.0 (close) → +1.0
-      1.0 (open)  → -1.0
-    Identico a _binarize_gripper_open nel codice ufficiale.
+    """Map model gripper output to robosuite gripper command convention.
+
+    Args:
+        gripper_val (float): Gripper value in the model domain.
+
+    Returns:
+        float: Gripper command where close is ``+1.0`` and open is ``-1.0``.
+
+    Raises:
+        ValueError: If `gripper_val` is NaN.
     """
     return 1.0 - 2.0 * float(gripper_val > 0.5)
 
 
 def extract_eef_state(obs) -> np.ndarray:
-    """Extract end-effector xyz position from robosuite observation dict."""
+    """Read end-effector position from observation keys used in LIBERO.
+
+    Args:
+        obs (dict): Observation dict from the environment.
+
+    Returns:
+        np.ndarray: End-effector position ``[3]`` with dtype ``np.float32``.
+
+    Raises:
+        KeyError: If no supported key for end-effector position is found.
+    """
     candidate_keys = [
         "robot0_eef_pos",
         "eef_pos",
@@ -387,6 +343,18 @@ def extract_eef_state(obs) -> np.ndarray:
 
 
 def _parse_levels(cfg) -> list:
+    """Expand level presets into an explicit command-level list.
+
+    Args:
+        cfg (GenerateConfig): Runtime config with `change_command` and
+            `command_level` fields.
+
+    Returns:
+        list[Optional[str]]: Levels to evaluate. `None` means default command.
+
+    Raises:
+        AttributeError: If expected config fields are missing.
+    """
     if not cfg.change_command or not cfg.command_level:
         return [None]
     presets = {
@@ -414,6 +382,33 @@ def run_episode(
     frame_save_dir: Optional[str] = None,
     log_file=None,
 ):
+    """Run one rollout with InternVLA-M1 and collect rollout data.
+
+    This loop is where policy inference meets simulator control. It queries one
+    action chunk every `chunk_size` steps, applies end-effector delta (R^7)
+    controls, and stops when the environment reports success.
+
+    Args:
+        cfg: Runtime config.
+        env: LIBERO environment instance.
+        task_description (str): Instruction used for this rollout.
+        policy (InternVLA_M1_policy): Loaded model wrapper.
+        initial_state: Optional deterministic initial state for the task.
+        collect_vlm_bbox (bool): If true, asks the policy for extra metadata.
+        frame_save_dir (Optional[str]): Reserved path for optional debug frames.
+        log_file: Optional file handle for persistent logs.
+
+    Returns:
+        tuple[bool, dict]: ``(success, replay_traj)`` where `replay_traj`
+        contains `images`, `states`, `task_command`, and `actions`.
+
+    Raises:
+        RuntimeError: Internal errors are caught and converted to `success=False`.
+
+    Example:
+        >>> success, replay = run_episode(cfg, env, text, policy, init_state)
+        >>> print(success, len(replay["actions"]))
+    """
     env.reset()
 
     if initial_state is not None:
@@ -421,13 +416,13 @@ def run_episode(
     else:
         obs = env.reset()
 
-    # Aspetta stabilizzazione fisica
+    # Wait a few steps after reset for simulator stabilization.
     for _ in range(cfg.num_steps_wait):
         obs, _, _, _ = env.step(get_libero_dummy_action("tiny_vla"))
 
     max_timesteps = TASK_MAX_STEPS.get(cfg.task_suite_name, 300)
-    chunk_size    = policy.chunk_size   # da config (es. 8)
-    query_freq    = chunk_size          # query ogni chunk_size step (no temporal agg)
+    chunk_size    = policy.chunk_size
+    query_freq    = chunk_size
 
     # Use task_description directly without grounding
     image_list, action_list, state_list = [], [], []
@@ -440,7 +435,6 @@ def run_episode(
             image_list.append(agentview.copy())
             state_list.append(extract_eef_state(obs).copy())
 
-            # Query policy ogni chunk_size step
             if t % query_freq == 0:
                 if collect_vlm_bbox:
                     current_chunk, pred_meta = policy.predict(
@@ -449,15 +443,6 @@ def run_episode(
                         task_description,
                         return_metadata=True,
                     )
-                    #if frame_save_dir:
-                    #    drawn = save_vlm_bbox_frame(frame_save_dir, t, agentview, wrist, pred_meta)
-                    #    if drawn > 0:
-                    #        log_message(f"Saved bbox frame @ t={t} with {drawn} boxes", log_file)
-                    #    else:
-                    #        log_message(
-                    #            f"Saved frame @ t={t} without bbox (model keys={pred_meta.get('pred_keys', [])})",
-                    #            log_file,
-                    #        )
                 else:
                     current_chunk = policy.predict(
                                                     agentview, wrist, task_description,
@@ -466,10 +451,8 @@ def run_episode(
                                                     )
                 # current_chunk: [chunk_size, 7]
 
-            # Esegui l'azione corrente nel chunk
             action_raw = current_chunk[t % chunk_size]          # [7]
 
-            # Converti gripper in formato delta_qpos robosuite
             gripper_env = binarize_gripper_for_robosuite(action_raw[6])
             env_action  = np.concatenate([action_raw[:6], [gripper_env]])
 
@@ -496,21 +479,47 @@ def run_episode(
 
 # ─── Task runner ─────────────────────────────────────────────────────────────
 
-
 def run_task(cfg, task_suite, task_id, policy, log_file,
              total_episodes=0, total_successes=0, run_id: Optional[str] = None):
+    """Run all rollouts for one task and its BDDL task variants.
+
+    This function handles variant discovery (`*_syn_<level>.bddl` and optional
+    `*_syn_<level>_vN.bddl`) and computes task success rate over all rollouts.
+    It is used in syntactic generalization runs (L1/L2/L3) and default-command
+    baseline runs.
+
+    Args:
+        cfg: Runtime config.
+        task_suite: LIBERO benchmark suite instance.
+        task_id (int): Zero-based task index in the suite.
+        policy (InternVLA_M1_policy): Loaded policy wrapper.
+        log_file: Open log handle for this evaluation run.
+        total_episodes (int): Running rollout counter across tasks.
+        total_successes (int): Running success counter across tasks.
+        run_id (Optional[str]): Run identifier used by the caller.
+
+    Returns:
+        tuple[int, int, str, float, int]: Updated global counters, canonical
+        task name, task success rate, and number of rollouts for this task.
+
+    Raises:
+        AssertionError: If `selected_version` is used with inconsistent config.
+        OSError: If BDDL task variant discovery fails on filesystem access.
+
+    Example:
+        >>> stats = run_task(cfg, suite, 0, policy, log_file)
+        >>> print(stats[3])  # task success rate
+    """
 
     task           = task_suite.get_task(task_id)
     initial_states = task_suite.get_task_init_states(task_id)
 
-    # Guardia: selected_version richiede change_command + command_level
     if cfg.selected_version is not None:
         assert cfg.change_command and cfg.command_level is not None, (
-            f"selected_version={cfg.selected_version} richiede "
-            f"change_command=True e command_level non-None"
+            f"selected_version={cfg.selected_version} requires "
+            f"change_command=True and command_level is not None"
         )
 
-    # ── Discovery delle versioni disponibili ──────────────────────────────
     available_versions = []
     has_base_syn = False
     base_syn_filename = None
@@ -523,7 +532,6 @@ def run_task(cfg, task_suite, task_id, policy, log_file,
         except Exception:
             bddl_folder = os.path.dirname(task.bddl_file)
 
-        # file base: *_syn_l3.bddl
         base_syn_file = f"{base_name}_syn_{cfg.command_level}.bddl"
         base_syn_path = os.path.join(bddl_folder, os.path.basename(base_syn_file))
         if os.path.isfile(base_syn_path):
@@ -533,7 +541,6 @@ def run_task(cfg, task_suite, task_id, policy, log_file,
         else:
             log_message(f"Warning: base syn file not found: {base_syn_path}", log_file)
 
-        # file versionati: *_syn_l3_v1.bddl, *_syn_l3_v2.bddl, ...
         pattern = f"{base_name}_syn_{cfg.command_level}_v"
         try:
             for filename in os.listdir(bddl_folder):
@@ -547,7 +554,6 @@ def run_task(cfg, task_suite, task_id, policy, log_file,
         available_versions.sort()
 
     elif cfg.change_command and cfg.command_level is not None and not cfg.use_versions:
-        # cerca il file base _syn_l3.bddl senza suffisso _vN
         base_name = task.bddl_file.replace('.bddl', '')
         try:
             from libero.libero import get_libero_path
@@ -558,15 +564,15 @@ def run_task(cfg, task_suite, task_id, policy, log_file,
         base_syn_file = f"{base_name}_syn_{cfg.command_level}.bddl"
         base_syn_path = os.path.join(bddl_folder, os.path.basename(base_syn_file))
         if os.path.isfile(base_syn_path):
-            # usa -1 come sentinel per "file base senza versione"
+            # Use -1 as a sentinel for the base BDDL task variant.
             available_versions = [(-1, os.path.basename(base_syn_path))]
             log_message(f"Found base syn file: {base_syn_path}", log_file)
         else:
             log_message(f"Warning: base syn file not found: {base_syn_path}", log_file)
 
-    # ── Versioni da testare ───────────────────────────────────────────────
-    # -1  -> file base *_syn_l3.bddl
-    # >=0 -> file versionato *_syn_l3_vN.bddl
+    # ── Testing version ───────────────────────────────────────────────
+    # -1  -> base file *_syn_l3.bddl
+    # >=0 -> versioned file *_syn_l3_vN.bddl
     if cfg.selected_version is not None:
         versions_to_test = [cfg.selected_version]
     else:
@@ -584,9 +590,7 @@ def run_task(cfg, task_suite, task_id, policy, log_file,
     log_message("=" * 80, log_file)
 
     task_results_per_version = {}
-    task_canonical_description = None  # descrizione stabile (prima versione)
-
-    # ── Loop versioni ─────────────────────────────────────────────────────
+    task_canonical_description = None
     for version_to_test in versions_to_test:
         ablation_bddl_file = None
 
@@ -662,7 +666,6 @@ def run_task(cfg, task_suite, task_id, policy, log_file,
                 f"({100*total_successes/total_episodes:.1f}%)", log_file
             )
 
-        # ── Risultati per versione ────────────────────────────────────────
         version_sr = task_successes / task_episodes if task_episodes > 0 else 0.0
         log_message(f"\n{'='*80}", log_file)
         log_message(f"VERSION {version_label} RESULTS:", log_file)
@@ -682,13 +685,11 @@ def run_task(cfg, task_suite, task_id, policy, log_file,
         except Exception:
             pass
 
-    # ── Aggregazione per-task (usa contatori locali, non cumulativi) ──────
     total_task_episodes  = sum(r["episodes"]  for r in task_results_per_version.values())
     total_task_successes = sum(r["successes"] for r in task_results_per_version.values())
     task_sr = (total_task_successes / total_task_episodes
                if total_task_episodes > 0 else 0.0)
 
-    # ── Summary per versione ──────────────────────────────────────────────
     if len(versions_to_test) > 1:
         log_message("=" * 80, log_file)
         log_message("SUMMARY BY VERSION:", log_file)
@@ -758,6 +759,19 @@ class GenerateConfig:
 
 @draccus.wrap()
 def run_libero_eval(cfg: GenerateConfig):
+    """Run the full evaluation loop and print summary tables.
+
+    Args:
+        cfg (GenerateConfig): Runtime configuration parsed by draccus.
+
+    Returns:
+        None: Results are written to logs, optional JSON, and stdout.
+
+    Raises:
+        KeyError: If `task_suite_name` is not in LIBERO benchmark registry.
+        ValueError: If `task_range` cannot be parsed as `"start-end"`.
+        OSError: If log or summary paths cannot be written.
+    """
     set_env_seed(cfg.seed)
     print("=== CONFIGURATION ===")
     print(f"Model Path: {cfg.model_path}")
@@ -814,7 +828,6 @@ def run_libero_eval(cfg: GenerateConfig):
 
         log_file.close()
 
-    # Tabella finale
     print("\n" + "=" * 100)
     print("DETAILED RESULTS TABLE")
     print("=" * 100)
@@ -823,7 +836,6 @@ def run_libero_eval(cfg: GenerateConfig):
 
     all_tasks = list(next(iter(task_results.values())).keys())
     for t in all_tasks:
-        # Somma episodi e successi su tutti i level (o usa il primo se single-level)
         for l, res in task_results.items():
             sr  = res.get(t, {}).get("success_rate", 0.0)
             eps = res.get(t, {}).get("episodes", 0)
@@ -835,7 +847,7 @@ def run_libero_eval(cfg: GenerateConfig):
 
     print("-" * 100)
 
-    # Riga OVERALL
+    # OVERALL row.
     for l, res in all_results.items():
         overall_sr   = res["success_rate"]
         total_eps    = res["total_episodes"]

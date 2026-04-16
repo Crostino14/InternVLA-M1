@@ -17,7 +17,7 @@ SCRIPT_PATH="$(realpath $0)"
 export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 export PATH=$CUDA_HOME/bin:$PATH
 export WANDB_MODE=offline
-export USE_TF=0      # impedisce a transformers di tentare l'import di TF
+export USE_TF=0
 export USE_JAX=0
 
 source $HOME/anaconda3/etc/profile.d/conda.sh

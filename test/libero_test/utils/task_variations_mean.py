@@ -1,19 +1,11 @@
 #!/usr/bin/env python3
 """
-Generate per-task, per-level syntactic evaluation tables in Excel.
+Generate per-task syntactic variation summary tables in Excel.
 
-Output: one Excel file with 3 sheets (L1, L2, L3).
-Each sheet contains stacked tables — one per task (0-9).
-Each table has:
-  Rows  : configured model/variant combinations
-  Cols  : Model | Original (syn_base) | V1 | V2 | V3 | Mean SR%
-  Footer: variation command strings aligned under each version column
-
-Values are Mean SR% ± Std% across seeds (ddof=1).
-
-Usage:
-    python generate_task_tables.py
-    python generate_task_tables.py --output_xlsx task_tables.xlsx
+This script reads log outputs for multiple InternVLA-M1 variants, aggregates
+task success rate values across seeds, and writes one workbook with L1/L2/L3
+sheets. Each sheet contains one block per task with version columns
+(`syn_base`, `v1`, `v2`, `v3`) and a variation-command footer row.
 """
 
 import os, re, glob, argparse
@@ -81,9 +73,19 @@ THIN = Side(style="thin",   color="B0C4DE")
 MED  = Side(style="medium", color="1F3864")
 
 def tb():
+    """Return thin-border style used for regular cells.
+
+    Returns:
+        Border: OpenPyXL border object.
+    """
     return Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 
 def mb():
+    """Return medium-border style used for emphasized cells.
+
+    Returns:
+        Border: OpenPyXL border object.
+    """
     return Border(left=MED, right=MED, top=MED, bottom=MED)
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -99,12 +101,14 @@ _ST_RE      = re.compile(r"seed(\d+)_task(\d+)")
 
 
 def parse_file(filepath):
-    """
+    """Parse one evaluation file and extract task-level metrics.
+
+    Args:
+        filepath (str): Path to one evaluation log file.
+
     Returns:
-        task_name      : str   — natural language task description
-        version_srs    : dict  {version_key: float}  SR in % (0–100)
-        task_sr        : float | None                overall Task SR in %
-        variation_cmds : dict  {version_key: str}
+        tuple: Task command string, version-level task success rates in `%`,
+        overall task success rate in `%` (or `None`), and variation command map.
     """
     with open(filepath, "r", errors="replace") as f:
         content = f.read()
@@ -131,14 +135,16 @@ def parse_file(filepath):
 
 
 def collect_task_data(model_dir, level, task_id):
-    """
-    Reads all seed files for (model_dir, level, task_id).
-    Deduplicates by (seed, task) key — keeps latest timestamp.
+    """Collect and aggregate one task across all seeds for one model.
+
+    Args:
+        model_dir (str): Model-level directory containing `l1/l2/l3` folders.
+        level (str): Syntactic level folder (`l1`, `l2`, `l3`).
+        task_id (int): Zero-based task id.
+
     Returns:
-        task_name      : str | None
-        version_stats  : dict {ver: (mean_sr, std_sr)}  in %
-        task_sr_stats  : (mean_sr, std_sr) | (None, None)
-        variation_cmds : dict {ver: str}
+        tuple: Task name, per-version `(mean, std)` in `%`, overall task
+        success-rate stats, and variation command strings.
     """
     level_dir = os.path.join(model_dir, level)
     if not os.path.isdir(level_dir):
@@ -197,17 +203,33 @@ def collect_task_data(model_dir, level, task_id):
 # EXCEL BUILDER
 # ──────────────────────────────────────────────────────────────────────────────
 def _fmt(mean, std):
+    """Format one `mean ± std` string in percentage.
+
+    Args:
+        mean (float): Mean task success rate.
+        std (float): Standard deviation.
+
+    Returns:
+        str: Formatted percentage string.
+    """
     return f"{mean:.1f}% ± {std:.1f}%"
 
 
 def write_task_table(ws, start_row, level_label, task_id, task_name,
                      models_data, versions):
-    """
-    Write one task table into ws starting at start_row.
+    """Write one task block to a worksheet.
 
-    models_data : list of (model_name, version_stats, task_sr_stats, var_cmds)
-    versions    : ordered list of version keys present in this table
-    Returns     : next available row (after 1-row gap)
+    Args:
+        ws: Target worksheet.
+        start_row (int): First row for this task block.
+        level_label (str): Display label (`L1`, `L2`, `L3`).
+        task_id (int): Zero-based task id.
+        task_name (str): Task command label.
+        models_data (list[tuple]): Model rows with aggregated metrics.
+        versions (list[str]): Ordered version keys shown as columns.
+
+    Returns:
+        int: Next free row index after this block.
     """
     COL_MODEL = 2
     COL_V0    = 3
@@ -299,6 +321,14 @@ def write_task_table(ws, start_row, level_label, task_id, task_name,
 
 
 def build_excel(output_path):
+    """Build the full workbook with all configured levels and tasks.
+
+    Args:
+        output_path (str): Destination `.xlsx` path.
+
+    Returns:
+        None: Writes workbook to disk.
+    """
     wb = Workbook()
     wb.remove(wb.active)
 
@@ -362,6 +392,11 @@ def build_excel(output_path):
 # MAIN
 # ──────────────────────────────────────────────────────────────────────────────
 def main():
+    """Parse CLI arguments and generate the workbook.
+
+    Returns:
+        None: Writes output file and prints progress.
+    """
     parser = argparse.ArgumentParser(
         description="Generate per-task syntactic evaluation tables in Excel.")
     parser.add_argument("--output_xlsx", default="task_tables.xlsx",

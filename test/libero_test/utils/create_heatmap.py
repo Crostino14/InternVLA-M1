@@ -1,3 +1,10 @@
+"""Create trajectory-density heatmaps from InternVLA-M1 rollout files.
+
+This script reads rollout `.npy` artifacts, extracts end-effector positions,
+and builds per-task plus combined heatmaps. It is used for qualitative failure
+analysis in syntactic and task-level generalization experiments.
+"""
+
 import argparse
 import glob
 import os
@@ -15,7 +22,15 @@ DEFAULT_STATE_KEYS = ["states", "ee_states", "robot_states", "qpos"]
 
 
 def infer_command_level_from_path(path):
-    """Infer command variation level from a rollout path."""
+    """Infer evaluation level from a rollout directory path.
+
+    Args:
+        path (str): Rollout directory path.
+
+    Returns:
+        str: Level label such as `DEFAULT`, `L1`, `L2`, `L3`,
+        `TASK_COMP_L1`, or `TASK_COMP_L2`.
+    """
     normalized_path = path.lower()
     if "task_comp_l1" in normalized_path:
         return "TASK_COMP_L1"
@@ -33,7 +48,15 @@ def infer_command_level_from_path(path):
 
 
 def get_rollout_paths(base_path, model_prefix):
-    """Return rollout folders for direct or multi-config layouts."""
+    """Return rollout subpaths for direct or multi-level layouts.
+
+    Args:
+        base_path (str): Root rollout path.
+        model_prefix (str): Display prefix for plot titles.
+
+    Returns:
+        list[tuple[str, str]]: `(path, model_label)` entries to process.
+    """
     run_folders_direct = glob.glob(os.path.join(base_path, "run_*"))
     if run_folders_direct:
         return [(base_path, model_prefix)]
@@ -55,7 +78,14 @@ def get_rollout_paths(base_path, model_prefix):
 
 
 def parse_episode_id(path):
-    """Extract episode id from rollout filename for stable sorting."""
+    """Extract rollout episode id from filename.
+
+    Args:
+        path (str): Rollout file path.
+
+    Returns:
+        int: Episode number if found, otherwise a large fallback key.
+    """
     match = re.search(r"episode=(\d+)", os.path.basename(path))
     if match:
         return int(match.group(1))
@@ -63,7 +93,16 @@ def parse_episode_id(path):
 
 
 def pick_state_array(rollout_data, state_keys):
-    """Return the first available state array from known keys."""
+    """Select the first available state array from preferred keys.
+
+    Args:
+        rollout_data (dict): Loaded rollout dictionary from `.npy`.
+        state_keys (list[str]): Priority order of state keys.
+
+    Returns:
+        tuple[np.ndarray | None, str | None]: Selected array and key, or
+        `(None, None)` when no candidate is found.
+    """
     for key in state_keys:
         if key in rollout_data:
             return np.array(rollout_data[key]), key
@@ -71,7 +110,15 @@ def pick_state_array(rollout_data, state_keys):
 
 
 def compute_heatmap_data(task_distribution):
-    """Compute heatmap data from trajectories without plotting."""
+    """Convert trajectories to a cropped density grid.
+
+    Args:
+        task_distribution (list[np.ndarray]): List of rollout trajectories with
+            xyz positions in meters.
+
+    Returns:
+        np.ndarray: Cropped density heatmap for plotting.
+    """
     px_resolution = 0.5  # cm per pixel
     table_size_cm = np.array(TABLE_SIZE) * 100
     table_size_px = (table_size_cm / px_resolution).astype(np.int32)
@@ -102,7 +149,17 @@ def compute_heatmap_data(task_distribution):
 
 
 def heat_map(task_distribution, task_path, task_name, command_level="DEFAULT"):
-    """Create and save single-task heatmap image."""
+    """Create and save one heatmap image for a single task.
+
+    Args:
+        task_distribution (list[np.ndarray]): Per-rollout xyz trajectories.
+        task_path (str): Output folder for saved image.
+        task_name (str): Task command label.
+        command_level (str): Level label shown in the title.
+
+    Returns:
+        np.ndarray: Cropped heatmap array used for plotting.
+    """
     cropped_map = compute_heatmap_data(task_distribution)
 
     y_min, y_max = -45, 20
@@ -143,7 +200,17 @@ def heat_map(task_distribution, task_path, task_name, command_level="DEFAULT"):
 
 
 def create_combined_heatmap(heatmaps_data, task_path, model_name, command_level):
-    """Create one horizontal image with all task heatmaps side-by-side."""
+    """Create one combined image with all task heatmaps.
+
+    Args:
+        heatmaps_data (dict[str, np.ndarray]): Task name to heatmap array.
+        task_path (str): Output folder for saved image.
+        model_name (str): Model name shown in figure title.
+        command_level (str): Level label shown in figure title.
+
+    Returns:
+        None: Writes image file to disk.
+    """
     if not heatmaps_data:
         print("WARNING: No heatmaps to combine")
         return
@@ -204,7 +271,18 @@ def create_combined_heatmap(heatmaps_data, task_path, model_name, command_level)
 
 
 def process_rollout_folder(test_path, model_name, dataset_config=None, state_keys=None):
-    """Process all rollouts in a folder and generate per-task heatmaps."""
+    """Process one rollout folder and generate task heatmaps.
+
+    Args:
+        test_path (str): Folder containing `run_*` rollout directories.
+        model_name (str): Display name used in plot titles.
+        dataset_config (dict | None): Optional dataset stats for
+            de-normalizing states.
+        state_keys (list[str] | None): Priority list for state-array keys.
+
+    Returns:
+        None: Writes per-task and combined heatmap images.
+    """
     command_level = infer_command_level_from_path(test_path)
     state_keys = state_keys or DEFAULT_STATE_KEYS
 

@@ -1,9 +1,13 @@
-"""
-run_internvla_eval_task_comp.py
+"""Run InternVLA-M1 task-composition evaluation on LIBERO-Goal.
 
-Evaluates an InternVLA-M1 trained policy on custom LIBERO task composition scenarios.
-Tests task-level generalization: the model must apply known primitives to new object/target
-combinations never seen during training.
+This script evaluates task-level zero-shot generalization for InternVLA-M1 on
+custom BDDL task variants built for Task-Level L1 and L2 settings. It loads
+the model checkpoint, creates LIBERO environments directly from BDDL paths, and
+runs closed-loop rollouts to compute task success rate. The script reuses known
+primitives in new combinations, which matches the thesis task-composition
+protocol for cross-object transfer (L1) and novel task composition (L2). It is
+an evaluation-only entry point and assumes the checkpoint was already fine-tuned
+on the nonoops variant.
 
 Custom tasks (all share the libero_goal scene):
   L1:
@@ -36,7 +40,7 @@ import json
 import imageio
 import draccus
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional, TextIO
 from enum import Enum
 from PIL import Image
 
@@ -64,7 +68,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def log_message(message: str, log_file=None):
+def log_message(message: str, log_file: Optional[TextIO] = None) -> None:
+    """Write one message to logger and optional log file.
+
+    Args:
+        message (str): Message text to log.
+        log_file (Optional[TextIO]): Open file handle used for persistent logs.
+
+    Returns:
+        None: This helper writes side effects only.
+
+    Raises:
+        OSError: If writing to the file handle fails.
+    """
     logger.info(message)
     if log_file:
         log_file.write(message + "\n")
@@ -130,9 +146,35 @@ TASK_MAX_STEPS = 500
 # ─── InternVLA-M1 Policy Wrapper ──────────────────────────────────────────────
 
 class InternVLA_M1_policy:
-    """Policy wrapper for InternVLA-M1."""
+    """Inference wrapper used by InternVLA-M1 rollout evaluation.
+
+    The instance stores the loaded model and the scaling values needed to map
+    normalized model outputs to end-effector delta (R^7) controls.
+
+    Attributes:
+        model (InternVLA_M1): Loaded model in eval mode.
+        device (str): Torch device used for inference.
+        action_mask (np.ndarray): Mask that selects scaled action dimensions.
+        action_high (np.ndarray): Upper bounds for scaled action dimensions.
+        action_low (np.ndarray): Lower bounds for scaled action dimensions.
+        chunk_size (int): Number of actions in each action chunk.
+    """
 
     def __init__(self, model_path: str, device: str = "cuda"):
+        """Load InternVLA-M1 and read action scaling metadata.
+
+        Args:
+            model_path (str): Path to model checkpoint directory/file.
+            device (str): Device string, usually `"cuda"` or `"cpu"`.
+
+        Returns:
+            None: Initializes the wrapper in place.
+
+        Raises:
+            FileNotFoundError: If model files are missing.
+            RuntimeError: If checkpoint loading fails.
+            KeyError: If normalization metadata does not contain expected keys.
+        """
         from InternVLA.model.framework.share_tools import read_model_config
         log_message(f"Loading InternVLA-M1 from {model_path}")
         self.model = InternVLA_M1.from_pretrained(model_path)
@@ -154,6 +196,29 @@ class InternVLA_M1_policy:
     def predict(self, agentview_img: np.ndarray, wrist_img: np.ndarray,
                 instruction: str, cfg_scale: float = 1.5,
                 num_ddim_steps: int = 10) -> np.ndarray:
+        """Predict one action chunk for the current rollout state.
+
+        Args:
+            agentview_img (np.ndarray): Agent-view RGB frame with shape
+                ``[H, W, 3]``, dtype ``np.uint8``.
+            wrist_img (np.ndarray): Wrist-view RGB frame with shape
+                ``[H, W, 3]``, dtype ``np.uint8``.
+            instruction (str): Task instruction for language conditioning.
+            cfg_scale (float): Guidance scale for diffusion sampling.
+            num_ddim_steps (int): Number of DDIM denoising steps.
+
+        Returns:
+            np.ndarray: Predicted action chunk with shape ``[T, 7]``, where
+            dimensions are end-effector delta (R^7) with binary gripper state.
+
+        Raises:
+            RuntimeError: If model inference fails.
+            KeyError: If expected prediction keys are missing.
+
+        Example:
+            >>> chunk = policy.predict(agent_img, wrist_img, command)
+            >>> print(chunk.shape)  # [T, 7]
+        """
         view1 = Image.fromarray(agentview_img)
         view2 = Image.fromarray(wrist_img)
         with torch.inference_mode():
@@ -178,8 +243,20 @@ class InternVLA_M1_policy:
 
 # ─── Observation & Action Helpers ─────────────────────────────────────────────
 
-def get_obs_internvla(obs):
-    """Returns (agentview, wrist) as uint8 RGB arrays at 224x224."""
+def get_obs_internvla(obs: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    """Prepare camera observations for InternVLA-M1 input format.
+
+    Args:
+        obs (dict[str, Any]): LIBERO observation dictionary.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: Agent and wrist RGB images with shape
+        ``[224, 224, 3]``, dtype ``np.uint8``.
+
+    Raises:
+        KeyError: If required camera keys are missing.
+        cv2.error: If resizing fails.
+    """
     agentview = np.ascontiguousarray(obs['agentview_image'][::-1, ::-1])
     wrist      = np.ascontiguousarray(obs['robot0_eye_in_hand_image'][::-1, ::-1])
     agentview  = cv2.resize(agentview, (224, 224))
@@ -188,12 +265,30 @@ def get_obs_internvla(obs):
 
 
 def binarize_gripper_for_robosuite(gripper_val: float) -> float:
-    """Converts unnormalized gripper {0.0, 1.0} to robosuite delta_qpos."""
+    """Map gripper value to robosuite command sign.
+
+    Args:
+        gripper_val (float): Model gripper value in `{0.0, 1.0}` domain.
+
+    Returns:
+        float: Robosuite gripper command (`+1.0` close, `-1.0` open).
+    """
     return 1.0 - 2.0 * float(gripper_val > 0.5)
 
 
-def extract_eef_state(obs) -> np.ndarray:
-    """Extract end-effector xyz position from robosuite observation dict."""
+def extract_eef_state(obs: dict[str, Any]) -> np.ndarray:
+    """Extract end-effector position from observation fallback keys.
+
+    Args:
+        obs (dict[str, Any]): Robosuite observation dictionary.
+
+    Returns:
+        np.ndarray: End-effector position with shape ``[3]``, dtype
+        ``np.float32``.
+
+    Raises:
+        KeyError: If no supported key is present in the observation.
+    """
     candidate_keys = [
         "robot0_eef_pos",
         "eef_pos",
@@ -212,8 +307,23 @@ def extract_eef_state(obs) -> np.ndarray:
 
 # ─── Custom Task Loading ──────────────────────────────────────────────────────
 
-def load_custom_tasks(comp_level: str = "l1"):
-    """Build Task objects and load init_states for each task_comp task."""
+def load_custom_tasks(comp_level: str = "l1") -> list[dict[str, Any]]:
+    """Load task metadata and init states for one composition level.
+
+    Args:
+        comp_level (str): Task-composition level identifier (`"l1"` or `"l2"`).
+
+    Returns:
+        list[dict[str, Any]]: One entry per BDDL task variant. Each entry has
+        keys: `task`, `init_states`, `task_description`, and `bddl_path`.
+
+    Raises:
+        AssertionError: If a BDDL task variant or init-state file is missing.
+
+    Note:
+        This function connects each custom BDDL task variant to init states from
+        its reference source task, as required by the thesis task-level protocol.
+    """
     bddl_dir = os.path.join(get_libero_path("bddl_files"), "libero_goal")
     init_dir  = os.path.join(get_libero_path("init_states"), "libero_goal")
 
@@ -252,8 +362,16 @@ def load_custom_tasks(comp_level: str = "l1"):
     return custom_tasks
 
 
-def create_env_from_bddl(bddl_path, resolution=256):
-    """Create LIBERO environment directly from a BDDL file path."""
+def create_env_from_bddl(bddl_path: str, resolution: int = 256) -> OffScreenRenderEnv:
+    """Create an off-screen LIBERO environment from one BDDL path.
+
+    Args:
+        bddl_path (str): Absolute path to a BDDL task variant file.
+        resolution (int): Camera height/width in pixels.
+
+    Returns:
+        OffScreenRenderEnv: Initialized simulator environment.
+    """
     env_args = {
         "bddl_file_name": bddl_path,
         "camera_heights": resolution,
@@ -266,7 +384,19 @@ def create_env_from_bddl(bddl_path, resolution=256):
 
 # ─── Logging Setup ────────────────────────────────────────────────────────────
 
-def setup_logging(cfg):
+def setup_logging(cfg: "GenerateConfig") -> tuple[TextIO, str, str]:
+    """Create run log file and return logging handles.
+
+    Args:
+        cfg (GenerateConfig): Runtime configuration.
+
+    Returns:
+        tuple[TextIO, str, str]: Open log file handle, local log file path, and
+        run identifier string.
+
+    Raises:
+        OSError: If log directory or file creation fails.
+    """
     run_id = f"EVAL-task_comp_{cfg.comp_level}-internvla_m1-{DATE_TIME}"
     if cfg.run_id_note:
         run_id += f"--{cfg.run_id_note}"
@@ -282,7 +412,25 @@ def setup_logging(cfg):
 
 def run_episode(cfg, env, task_description: str, policy: InternVLA_M1_policy,
                 initial_state=None, log_file=None):
-    """Run a single episode with InternVLA-M1."""
+    """Run one rollout and collect images, states, and actions.
+
+    Args:
+        cfg (GenerateConfig): Runtime configuration.
+        env (OffScreenRenderEnv): Environment for the selected BDDL task
+            variant.
+        task_description (str): Language command used by the policy.
+        policy (InternVLA_M1_policy): Loaded model wrapper.
+        initial_state (Optional[Any]): Deterministic start state for this
+            rollout.
+        log_file (Optional[TextIO]): Optional file handle for logs.
+
+    Returns:
+        tuple[bool, dict[str, Any]]: Success flag and rollout payload with
+        `images`, `states`, `task_command`, and `actions`.
+
+    Raises:
+        RuntimeError: Runtime errors are caught and converted to `success=False`.
+    """
     env.reset()
 
     if initial_state is not None:
@@ -338,7 +486,25 @@ def run_episode(cfg, env, task_description: str, policy: InternVLA_M1_policy,
 
 def run_custom_task(cfg, task_info, task_idx, num_tasks, policy,
                     log_file, total_episodes=0, total_successes=0):
-    """Run evaluation for a single task_comp task with InternVLA-M1."""
+    """Evaluate one custom task across repeated rollouts.
+
+    Args:
+        cfg (GenerateConfig): Runtime configuration.
+        task_info (dict[str, Any]): Task package returned by `load_custom_tasks`.
+        task_idx (int): Zero-based index in the selected task subset.
+        num_tasks (int): Total number of tasks in the selected subset.
+        policy (InternVLA_M1_policy): Loaded model wrapper.
+        log_file (TextIO): Open run log handle.
+        total_episodes (int): Running rollout counter.
+        total_successes (int): Running success counter.
+
+    Returns:
+        tuple[int, int, str, float, int, int]: Updated counters, task label,
+        task success rate, task episode count, and task success count.
+
+    Raises:
+        OSError: If output video/trajectory files cannot be written.
+    """
     task             = task_info["task"]
     init_states      = task_info["init_states"]
     task_description = task_info["task_description"]
@@ -413,6 +579,16 @@ def run_custom_task(cfg, task_info, task_idx, num_tasks, policy,
 # ─── Results Table ────────────────────────────────────────────────────────────
 
 def print_results_table(task_results, all_results, comp_level: str):
+    """Print a compact table with per-task and overall results.
+
+    Args:
+        task_results (dict[str, dict[str, float]]): Per-task metrics dictionary.
+        all_results (dict[str, float]): Overall metrics dictionary.
+        comp_level (str): Task-composition level label shown in the header.
+
+    Returns:
+        None: Prints to stdout.
+    """
     print("\n" + "=" * 100)
     print(f"TASK COMPOSITION {comp_level.upper()} (InternVLA-M1) - RESULTS TABLE")
     print("=" * 100)
@@ -464,7 +640,22 @@ class GenerateConfig:
 
 @draccus.wrap()
 def eval_task_comp(cfg: GenerateConfig) -> float:
-    """Evaluate InternVLA-M1 on task composition scenarios."""
+    """Run full task-composition evaluation for InternVLA-M1.
+
+    Args:
+        cfg (GenerateConfig): Runtime configuration parsed by draccus.
+
+    Returns:
+        float: Overall task success rate across all executed rollouts.
+
+    Raises:
+        OSError: If logs or summary outputs cannot be written.
+        AssertionError: If task assets are missing while loading tasks.
+
+    Example:
+        >>> sr = eval_task_comp(cfg)
+        >>> print(f"{sr:.3f}")
+    """
     set_seed_everywhere(cfg.seed)
 
     policy = InternVLA_M1_policy(cfg.model_path)

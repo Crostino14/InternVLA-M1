@@ -1,5 +1,9 @@
-"""
-calculate_table_internvla.py  — Sintattica DEFAULT/L1/L2/L3
+"""Build Excel tables for InternVLA-M1 syntactic evaluation logs.
+
+This utility reads evaluation logs for default, L1, L2, or L3 command settings
+and converts them into one Excel sheet with per-task task success rate values.
+It is used after rollout evaluation to summarize results across seeds in the
+format used in the thesis analysis pipeline.
 """
 
 import re, math, argparse, os, glob
@@ -11,6 +15,11 @@ from openpyxl.styles import Font, Alignment
 # ─── TASK ORDER ────────────────────────────────────────────────────────────────
 
 def get_task_order():
+    """Return the fixed LIBERO-Goal task order used in output tables.
+
+    Returns:
+        list[str]: Canonical ordered task commands.
+    """
     return [
         "Open the middle layer of the drawer",
         "Put the bowl on the stove",
@@ -26,6 +35,11 @@ def get_task_order():
 
 
 def get_variation_mapping():
+    """Map normalized variation commands to canonical task commands.
+
+    Returns:
+        dict[str, str]: Lower-cased variation command to canonical command.
+    """
     raw = {
         "open the middle layer of the drawer":                             "Open the middle layer of the drawer",
         "pull the middle layer of the drawer":                             "Open the middle layer of the drawer",
@@ -89,17 +103,22 @@ def get_variation_mapping():
 # ─── PARSER ────────────────────────────────────────────────────────────────────
 
 def parse_eval_log(filepath: str, num_trials: int = 50) -> list:
-    """
-    Parsa un file sintattica.
+    """Parse one syntactic evaluation log file.
 
-    Righe chiave (supporta vecchio + nuovo formato):
-      TASK X/10
-      Original: <testo>                    oppure Original Command: <testo>
-      Variation [L3]: <testo>              oppure Variation Command: <testo>
-      Task SR: 0.8800                       (decimale 0.0–1.0)
+    The parser supports both old and new log layouts and extracts per-task
+    command text, task success rate, and rollout counts.
 
-    Se "Task SR" non e presente, la funzione ricava SR da:
-      [default] ep N | success=True/False | ...
+    Args:
+        filepath (str): Path to one evaluation log file.
+        num_trials (int): Expected rollouts per task when logs do not include
+            explicit episode counters.
+
+    Returns:
+        list[dict]: Parsed task entries sorted by `task_id`.
+
+    Raises:
+        OSError: If the input file cannot be read.
+        ValueError: If numeric fields cannot be converted.
     """
     tasks, current = [], {}
 
@@ -107,7 +126,7 @@ def parse_eval_log(filepath: str, num_trials: int = 50) -> list:
         if not task_obj:
             return None
 
-        # Fallback: calcolo da episodi se Task SR non compare nel log.
+        # Fallback: derive task success rate from rollout success lines.
         if "task_sr" not in task_obj:
             ep = int(task_obj.get("episodes", 0))
             succ = int(task_obj.get("successes", 0))
@@ -116,7 +135,7 @@ def parse_eval_log(filepath: str, num_trials: int = 50) -> list:
             else:
                 return None
 
-        # Garantisce consistenza minima per le colonne Comp.
+        # Keep counts consistent for "successes/episodes" output columns.
         if "episodes" not in task_obj:
             task_obj["episodes"] = num_trials
         if "successes" not in task_obj:
@@ -127,7 +146,7 @@ def parse_eval_log(filepath: str, num_trials: int = 50) -> list:
         lines = [l.rstrip("\r\n") for l in f]
 
     for line in lines:
-        # Blocco task sintattica: "TASK X/10" senza "(Task Composition"
+        # Match syntactic task blocks only, not task-composition logs.
         m = re.match(r"^TASK\s+(\d+)/\d+\s*$", line)
         if m:
             prev = _finalize_current(current)
@@ -162,7 +181,7 @@ def parse_eval_log(filepath: str, num_trials: int = 50) -> list:
                 current["successes"] = int(current.get("successes", 0))
             continue
 
-        # "Task SR: 0.8800"  (decimale, nessuna parentesi)
+        # "Task SR" appears as decimal in [0, 1]; convert to percentage.
         m3 = re.match(r"^Task SR:\s*([0-9.]+)\s*$", line)
         if m3 and current:
             sr_decimal          = float(m3.group(1))          # es. 0.8800
@@ -182,7 +201,16 @@ def parse_eval_log(filepath: str, num_trials: int = 50) -> list:
 
 
 def merge_eval_files(filepaths: list, num_trials: int = 50) -> tuple:
-    """Fonde più file dello stesso seed (subset di task diversi)."""
+    """Merge multiple log files from the same seed.
+
+    Args:
+        filepaths (list[str]): Seed-specific log file paths.
+        num_trials (int): Rollout count per task used for fallback metrics.
+
+    Returns:
+        tuple: Merged task rates, episode counts, key order, original commands,
+        and variation commands.
+    """
     task_rates = defaultdict(list)   # key (original.lower()) → [pct, pct, ...]
     task_eps, task_orig, task_var = {}, {}, {}
     all_keys = []
@@ -207,6 +235,21 @@ def merge_eval_files(filepaths: list, num_trials: int = 50) -> tuple:
 
 def write_excel_syntactic(output_xlsx, txt_files_by_seed,
                            level="l3", num_trials=50, model_name="InternVLA-M1"):
+    """Write a syntactic-level Excel table from logs grouped by seed.
+
+    Args:
+        output_xlsx (str): Destination `.xlsx` path.
+        txt_files_by_seed (dict[int, list[str]]): Log files grouped by seed.
+        level (str): Command level (`default`, `l1`, `l2`, `l3`).
+        num_trials (int): Rollouts per task.
+        model_name (str): Model label for traceability in generated files.
+
+    Returns:
+        None: Writes the Excel file to disk.
+
+    Raises:
+        OSError: If output writing fails.
+    """
 
     print("\n[INFO] Parsing log files (syntactic)...")
     all_merged = []
@@ -215,12 +258,12 @@ def write_excel_syntactic(output_xlsx, txt_files_by_seed,
         print(f"  Seed {seed_idx}: {len(fps)} file(s)")
         merged = merge_eval_files(fps, num_trials)
         all_merged.append(merged)
-        print(f"    → {len(merged[0])} task trovati")
+        print(f"    -> {len(merged[0])} tasks found")
 
     variation_to_original = get_variation_mapping()
     fixed_order           = get_task_order()
 
-    # Mappa: original cased → log key
+    # Map canonical task command to the corresponding parsed log key.
     orig_to_log_key = {}
     for seed_data in all_merged:
         merged_rates, _, all_keys, task_orig, task_var = seed_data
@@ -251,7 +294,7 @@ def write_excel_syntactic(output_xlsx, txt_files_by_seed,
 
     all_seed_rates = [[], [], []]
     all_seed_comps = [[], [], []]
-    all_task_means = []  # Raccoglie i mean_r di ogni task per calcolare la baseline
+    all_task_means = []  # Collect per-task means to compute the baseline value.
 
     for task_num, orig_task in enumerate(fixed_order, start=1):
         log_key   = orig_to_log_key.get(orig_task, orig_task.lower())
@@ -263,7 +306,7 @@ def write_excel_syntactic(output_xlsx, txt_files_by_seed,
             ep   = task_eps.get(log_key, num_trials)
 
             if not math.isnan(rate):
-                succ = int(round(rate / 100 * ep))           # % → decimale → successi
+                succ = int(round(rate / 100 * ep))
             else:
                 succ = 0
 
@@ -290,7 +333,7 @@ def write_excel_syntactic(output_xlsx, txt_files_by_seed,
         else:
             mean_display, avg_succ = "N/A", 0
 
-    # Calcola la baseline: media e std di tutti i task mean
+    # Compute baseline as mean ± std over per-task means.
     if all_task_means:
         baseline_mean = sum(all_task_means) / len(all_task_means)
         baseline_std = math.sqrt(sum((m - baseline_mean)**2 for m in all_task_means) / max(len(all_task_means)-1, 1))
@@ -298,7 +341,7 @@ def write_excel_syntactic(output_xlsx, txt_files_by_seed,
     else:
         baseline_display = "N/A"
 
-    # Ora aggiungi tutte le righe con la baseline
+    # Write final task rows including the baseline column.
     for task_num, orig_task in enumerate(fixed_order, start=1):
         log_key   = orig_to_log_key.get(orig_task, orig_task.lower())
         variation = None
@@ -309,7 +352,7 @@ def write_excel_syntactic(output_xlsx, txt_files_by_seed,
             ep   = task_eps.get(log_key, num_trials)
 
             if not math.isnan(rate):
-                succ = int(round(rate / 100 * ep))           # % → decimale → successi
+                succ = int(round(rate / 100 * ep))
             else:
                 succ = 0
 
@@ -345,7 +388,7 @@ def write_excel_syntactic(output_xlsx, txt_files_by_seed,
             baseline_display,
         ])
 
-    # ── Riga finale ──
+    # Final aggregate row across tasks and seeds.
     final_row = ["", "Mean SR% ± Std%", ""]
     for seed_idx in range(3):
         rates = all_seed_rates[seed_idx]
@@ -378,12 +421,23 @@ def write_excel_syntactic(output_xlsx, txt_files_by_seed,
     _autowidth(ws)
     ws.row_dimensions[1].height = 30
     wb.save(output_xlsx)
-    print(f"\n[OK] Salvato: {output_xlsx}")
+    print(f"\n[OK] Saved: {output_xlsx}")
 
 
 # ─── AUTO-DETECT ───────────────────────────────────────────────────────────────
 
 def find_eval_files_by_seed(base_dir, level, pattern_prefix=None):
+    """Auto-detect syntactic evaluation logs for seeds 0, 1, and 2.
+
+    Args:
+        base_dir (str): Directory containing log files.
+        level (str): Command level (`default`, `l1`, `l2`, `l3`).
+        pattern_prefix (Optional[str]): Optional filename prefix override.
+
+    Returns:
+        dict[int, list[str]] | None: Files grouped by seed if all seeds are
+        present, otherwise `None`.
+    """
     if pattern_prefix is None:
         pattern_prefix = "EVAL-libero_goal-internvla_m1"
     result = {0: [], 1: [], 2: []}
@@ -400,6 +454,14 @@ def find_eval_files_by_seed(base_dir, level, pattern_prefix=None):
 
 
 def _autowidth(ws):
+    """Adjust worksheet column widths from cell content length.
+
+    Args:
+        ws: OpenPyXL worksheet.
+
+    Returns:
+        None: Mutates worksheet column width settings.
+    """
     for col in ws.columns:
         letter  = col[0].column_letter
         max_len = max((len(str(c.value or "")) for c in col), default=0)
@@ -409,6 +471,11 @@ def _autowidth(ws):
 # ─── MAIN ──────────────────────────────────────────────────────────────────────
 
 def main():
+    """Parse CLI arguments and generate one syntactic Excel table.
+
+    Returns:
+        None: Exits after writing output or printing an error.
+    """
     p = argparse.ArgumentParser()
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--txt_dir")
@@ -425,12 +492,12 @@ def main():
 
     if args.manual:
         if not (args.seed0 and args.seed1 and args.seed2):
-            exit("[ERROR] --manual richiede --seed0 --seed1 --seed2")
+            exit("[ERROR] --manual requires --seed0 --seed1 --seed2")
         files = {0: args.seed0, 1: args.seed1, 2: args.seed2}
     else:
         files = find_eval_files_by_seed(args.txt_dir, args.level, args.pattern)
         if files is None:
-            exit("[ERROR] File mancanti per alcuni seed!")
+            exit("[ERROR] Missing files for one or more seeds.")
 
     write_excel_syntactic(args.output_xlsx, files,
                           level=args.level,

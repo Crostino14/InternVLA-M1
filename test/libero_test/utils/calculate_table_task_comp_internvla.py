@@ -1,5 +1,8 @@
-"""
-calculate_table_task_comp_internvla.py  — Task Composition L1/L2
+"""Build Excel tables for InternVLA-M1 task-composition evaluation logs.
+
+This script parses task-composition logs for L1 or L2 settings, merges seed
+results, and writes one Excel table with per-task task success rate values. It
+is used after rollout evaluation in the task-level generalization pipeline.
 """
 
 import re, math, argparse, os, glob
@@ -10,9 +13,23 @@ from openpyxl.styles import Font, Alignment
 
 # ─── TASK ORDER & REFERENCE ────────────────────────────────────────────────────
 
-def normalize(s): return " ".join(s.strip().lower().split())
+def normalize(s):
+    """Normalize command text for stable matching.
+
+    Args:
+        s (str): Input command string.
+
+    Returns:
+        str: Lower-cased command with normalized whitespace.
+    """
+    return " ".join(s.strip().lower().split())
 
 def get_task_comp_l1_order():
+    """Return fixed task order for task-composition L1 tables.
+
+    Returns:
+        list[str]: Canonical L1 task commands.
+    """
     return [
         "Put the plate on the top of the cabinet",
         "Put the plate on the stove",
@@ -22,6 +39,11 @@ def get_task_comp_l1_order():
     ]
 
 def get_task_comp_l2_order():
+    """Return fixed task order for task-composition L2 tables.
+
+    Returns:
+        list[str]: Canonical L2 task commands.
+    """
     return [
         "Open the middle drawer of the cabinet",
         "Put the bowl on the stove",
@@ -31,6 +53,14 @@ def get_task_comp_l2_order():
     ]
 
 def get_reference_mapping(level="l1"):
+    """Return reference training-task mapping for one composition level.
+
+    Args:
+        level (str): Composition level (`l1` or `l2`).
+
+    Returns:
+        dict[str, str]: Normalized task command to reference task label.
+    """
     if level == "l2":
         return {
             normalize("Open the middle drawer of the cabinet"):
@@ -61,13 +91,18 @@ def get_reference_mapping(level="l1"):
 # ─── PARSER ────────────────────────────────────────────────────────────────────
 
 def parse_task_comp_log(filepath: str, num_trials: int = 50) -> list:
-    """
-    Parsa un file task comp.
+    """Parse one task-composition log file.
 
-    Righe chiave:
-      TASK X/N (Task Composition L2)
-      Command:   Put the cream cheese on the bowl ...
-      Task SR: 0.0000 (0.0%)   ← DECIMALE con parentesi → ×100 per %
+    Args:
+        filepath (str): Path to one task-composition log file.
+        num_trials (int): Rollout count per task used for episode/success fields.
+
+    Returns:
+        list[dict]: Parsed task entries sorted by `task_id`.
+
+    Raises:
+        OSError: If the file cannot be read.
+        ValueError: If a numeric field cannot be converted.
     """
     tasks, current = [], {}
 
@@ -86,7 +121,7 @@ def parse_task_comp_log(filepath: str, num_trials: int = 50) -> list:
             current["command"] = line.split("Command:", 1)[1].strip()
             continue
 
-        # "Task SR: 0.0000 (0.0%)"  ← con parentesi
+        # "Task SR" is stored as decimal; convert to percentage.
         m2 = re.match(r"^Task SR:\s*([0-9.]+)\s*\(", line)
         if m2 and current:
             sr_decimal          = float(m2.group(1))          # es. 0.0000
@@ -102,6 +137,15 @@ def parse_task_comp_log(filepath: str, num_trials: int = 50) -> list:
 
 
 def merge_task_comp_files(filepaths: list, num_trials: int = 50) -> tuple:
+    """Merge multiple task-composition log files from one seed.
+
+    Args:
+        filepaths (list[str]): Seed-specific log file paths.
+        num_trials (int): Rollout count per task.
+
+    Returns:
+        tuple: Merged rates, episode counts, and command key order.
+    """
     task_rates, task_eps, all_keys = defaultdict(list), {}, []
 
     for fp in filepaths:
@@ -120,6 +164,21 @@ def merge_task_comp_files(filepaths: list, num_trials: int = 50) -> tuple:
 
 def write_excel_task_comp(output_xlsx, txt_files_by_seed,
                            level="l1", num_trials=50, model_name="InternVLA-M1"):
+    """Write one task-composition Excel table from logs grouped by seed.
+
+    Args:
+        output_xlsx (str): Destination `.xlsx` path.
+        txt_files_by_seed (dict[int, list[str]]): Log files grouped by seed.
+        level (str): Task-composition level (`l1` or `l2`).
+        num_trials (int): Rollouts per task.
+        model_name (str): Model label for generated output.
+
+    Returns:
+        None: Writes the Excel file to disk.
+
+    Raises:
+        OSError: If output writing fails.
+    """
 
     print("\n[INFO] Parsing log files (task comp)...")
     all_merged = []
@@ -128,7 +187,7 @@ def write_excel_task_comp(output_xlsx, txt_files_by_seed,
         print(f"  Seed {seed_idx}: {len(fps)} file(s)")
         merged_rates, task_eps, all_keys = merge_task_comp_files(fps, num_trials)
         all_merged.append((merged_rates, task_eps, all_keys))
-        print(f"    → {len(merged_rates)} task trovati")
+        print(f"    -> {len(merged_rates)} tasks found")
 
     ref_mapping = get_reference_mapping(level)
     fixed_order = get_task_comp_l2_order() if level == "l2" else get_task_comp_l1_order()
@@ -188,7 +247,7 @@ def write_excel_task_comp(output_xlsx, txt_files_by_seed,
             f"{avg_succ}/{num_trials}",
         ])
 
-    # ── Riga finale ──
+    # Final aggregate row across tasks and seeds.
     final_row = ["", "Mean SR% ± Std%", ""]
     for seed_idx in range(3):
         rates = all_seed_rates[seed_idx]
@@ -219,12 +278,23 @@ def write_excel_task_comp(output_xlsx, txt_files_by_seed,
     _autowidth(ws)
     ws.row_dimensions[1].height = 30
     wb.save(output_xlsx)
-    print(f"\n[OK] Salvato: {output_xlsx}")
+    print(f"\n[OK] Saved: {output_xlsx}")
 
 
 # ─── AUTO-DETECT ───────────────────────────────────────────────────────────────
 
 def find_task_comp_files_by_seed(base_dir, level, pattern_prefix=None):
+    """Auto-detect task-composition logs for seeds 0, 1, and 2.
+
+    Args:
+        base_dir (str): Directory containing log files.
+        level (str): Composition level (`l1` or `l2`).
+        pattern_prefix (Optional[str]): Optional filename prefix override.
+
+    Returns:
+        dict[int, list[str]] | None: Files grouped by seed when all seeds are
+        present, otherwise `None`.
+    """
     if pattern_prefix is None:
         pattern_prefix = f"EVAL-task_comp_{level}-internvla_m1"
     result = {0: [], 1: [], 2: []}
@@ -241,6 +311,14 @@ def find_task_comp_files_by_seed(base_dir, level, pattern_prefix=None):
 
 
 def _autowidth(ws):
+    """Adjust worksheet column widths from content length.
+
+    Args:
+        ws: OpenPyXL worksheet.
+
+    Returns:
+        None: Mutates worksheet column width settings.
+    """
     for col in ws.columns:
         letter  = col[0].column_letter
         max_len = max((len(str(c.value or "")) for c in col), default=0)
@@ -250,6 +328,11 @@ def _autowidth(ws):
 # ─── MAIN ──────────────────────────────────────────────────────────────────────
 
 def main():
+    """Parse CLI arguments and generate one task-composition Excel table.
+
+    Returns:
+        None: Exits after writing output or printing an error.
+    """
     p = argparse.ArgumentParser()
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--txt_dir")
@@ -266,12 +349,12 @@ def main():
 
     if args.manual:
         if not (args.seed0 and args.seed1 and args.seed2):
-            exit("[ERROR] --manual richiede --seed0 --seed1 --seed2")
+            exit("[ERROR] --manual requires --seed0 --seed1 --seed2")
         files = {0: args.seed0, 1: args.seed1, 2: args.seed2}
     else:
         files = find_task_comp_files_by_seed(args.txt_dir, args.level, args.pattern)
         if files is None:
-            exit("[ERROR] File mancanti per alcuni seed!")
+            exit("[ERROR] Missing files for one or more seeds.")
 
     write_excel_task_comp(args.output_xlsx, files,
                           level=args.level,
