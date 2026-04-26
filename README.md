@@ -8,6 +8,26 @@ https://github.com/user-attachments/assets/e83ae046-a503-46a8-95e4-ef381919b7f8
 
 ![](assets/teaser.png)
 
+## Changes from the Original Repository
+
+> ⚠️ **This is a fork of the original [InternVLA-M1](https://github.com/InternRobotics/InternVLA-M1) repository.**
+>
+> It has been used as part of the following research project:
+>
+> **[Evaluating Generalization of State-of-the-Art Multi-Task Language-Conditioned Imitation Learning Systems](https://github.com/Crostino14/Evaluating-Generalization-of-Sota-Multi-Task-Language-Conditioned-Imitation-Learning-Systems)**
+>
+> All credits for the original framework go to the InternRobotics team. The modifications introduced in this fork are described below.
+
+This fork extends the original InternVLA-M1 codebase with scripts and configurations used to evaluate the model on the zero-shot generalization benchmark described in the project above. Specifically, the following additions were made:
+
+- **LIBERO-Goal evaluation scripts** (`examples/LIBERO/`): adapted inference pipeline to load custom BDDL task variants (syntactic and task-level generalization levels) defined in the [LIBERO fork](https://github.com/Crostino14/LIBERO).
+- **Embedding extraction scripts**: tooling to extract and analyze language instruction embeddings from the Qwen2.5-VL-3B backbone, used for cosine similarity, Euclidean distance, and normalized Levenshtein distance analysis across instruction variants.
+- **L3 fine-tuning script** (`finetune_internvla_libero_goal_l3.sh`): SLURM launcher for targeted fine-tuning on the `lerobot_libero_goal_l3` dataset, with selective backbone freezing to mitigate catastrophic forgetting during compositional spatial reference adaptation.
+- **Conda environment files** (`test/env_requirements/`): reproducible environment specifications for LIBERO evaluation and embedding analysis.
+
+No changes were made to the core model architecture, training logic, or pretrained weights.
+
+
 ## 🔥 Key Features
 
 1. **Modular & Extensible**  
